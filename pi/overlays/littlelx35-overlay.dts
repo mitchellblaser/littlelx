@@ -1,0 +1,112 @@
+/*
+ * littlelx35: generic 3.5" 480x320 SPI touchscreens - ILI9486 display +
+ * XPT2046 touch on the Pi header (goodtft "MPI3501"/"3.5inch RPi Display",
+ * LCD-show "tft35a"/"mhs35" and their many clones).
+ *
+ * Same pins as Waveshare/piscreen (LCD CE0, touch CE1, DC GPIO24,
+ * RESET GPIO25, PENIRQ GPIO17) but these panels need the longer power-up
+ * sequence below; with the short piscreen one they just stay white.
+ *
+ * Params: speed (SPI Hz), rotate (0/90/180/270), fps, bgr (swap red/blue),
+ *         invx, invy, swapxy (touch axes - calibration handles these anyway)
+ */
+/dts-v1/;
+/plugin/;
+
+/ {
+	compatible = "brcm,bcm2835";
+
+	fragment@0 {
+		target = <&spi0>;
+		__overlay__ {
+			status = "okay";
+		};
+	};
+
+	fragment@1 {
+		target = <&spidev0>;
+		__overlay__ {
+			status = "disabled";
+		};
+	};
+
+	fragment@2 {
+		target = <&spidev1>;
+		__overlay__ {
+			status = "disabled";
+		};
+	};
+
+	fragment@3 {
+		target = <&gpio>;
+		__overlay__ {
+			llx_pins: llx_pins {
+				brcm,pins = <17 25 24>;
+				brcm,function = <0 0 0>; /* as LCD-show; the drivers set directions */
+			};
+		};
+	};
+
+	fragment@4 {
+		target = <&spi0>;
+		__overlay__ {
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			llx_lcd: littlelx35@0 {
+				compatible = "ilitek,ili9486";
+				reg = <0>;
+				pinctrl-names = "default";
+				pinctrl-0 = <&llx_pins>;
+
+				spi-max-frequency = <16000000>; /* same as LCD-show tft35a */
+				txbuflen = <32768>;
+				rotate = <0>;
+				fps = <40>;
+				buswidth = <8>;
+				regwidth = <16>;
+				reset-gpios = <&gpio 25 1>; /* active low */
+				dc-gpios = <&gpio 24 0>;
+				debug = <0>;
+
+				init = <0x10000f1 0x36 0x04 0x00 0x3c 0x0f 0x8f
+					0x10000f2 0x18 0xa3 0x12 0x02 0xb2 0x12 0xff 0x10 0x00
+					0x10000f8 0x21 0x04
+					0x10000f9 0x00 0x08
+					0x1000036 0x08
+					0x10000b4 0x00
+					0x10000c1 0x41
+					0x10000c5 0x00 0x91 0x80 0x00
+					0x10000e0 0x0f 0x1f 0x1c 0x0c 0x0f 0x08 0x48 0x98 0x37 0x0a 0x13 0x04 0x11 0x0d 0x00
+					0x10000e1 0x0f 0x32 0x2e 0x0b 0x0d 0x05 0x47 0x75 0x37 0x06 0x10 0x03 0x24 0x20 0x00
+					0x100003a 0x55
+					0x1000011
+					0x1000036 0x28
+					0x20000ff
+					0x1000029>;
+			};
+
+			llx_ts: littlelx35-ts@1 {
+				compatible = "ti,ads7846";
+				reg = <1>;
+				spi-max-frequency = <2000000>;
+				interrupts = <17 2>; /* falling edge */
+				interrupt-parent = <&gpio>;
+				pendown-gpio = <&gpio 17 1>;
+				ti,x-plate-ohms = /bits/ 16 <60>;
+				ti,pressure-max = /bits/ 16 <255>;
+			};
+		};
+	};
+
+	__overrides__ {
+		speed =  <&llx_lcd>,"spi-max-frequency:0";
+		rotate = <&llx_lcd>,"rotate:0";
+		fps =    <&llx_lcd>,"fps:0";
+		bgr =    <&llx_lcd>,"bgr?";
+		debug =  <&llx_lcd>,"debug:0";
+		invx =   <&llx_ts>,"touchscreen-inverted-x?";
+		invy =   <&llx_ts>,"touchscreen-inverted-y?";
+		swapxy = <&llx_ts>,"touchscreen-swapped-x-y?";
+	};
+};

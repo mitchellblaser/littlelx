@@ -76,6 +76,9 @@ cp "$K"/arch/arm/boot/dts/broadcom/bcm2710-rpi-3-b{,-plus}.dtb "$S/"
 for o in $OVERLAYS; do
 	cp "$K/arch/arm/boot/dts/overlays/$o.dtbo" "$S/overlays/"
 done
+for src in "$HERE"/overlays/*-overlay.dts; do   # our own overlays
+	"$K/scripts/dtc/dtc" -@ -q -I dts -O dtb -o "$S/overlays/$(basename "$src" -overlay.dts).dtbo" "$src"
+done
 cp "$K/arch/arm/boot/dts/overlays/overlay_map.dtb" "$S/overlays/" 2>/dev/null || true
 echo "$VERSION" > "$S/VERSION"
 

@@ -715,6 +715,10 @@ class Bridge:
             if cal:
                 self.to_pi("K " + " ".join(str(x) for x in cal))
             self.screen.draw()
+        elif parts[0] == "INFO":
+            print("Touchscreen status: " + " ".join(parts[1:]))
+            if "fb=missing" in parts:
+                print("  -> no display found: check the dtoverlay= line in the SD card's config.txt")
         elif parts[0] == "P" and len(parts) > 1:
             self.screen.on_press(int(parts[1]))
         elif parts[0] == "R" and len(parts) > 1:

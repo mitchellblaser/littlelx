@@ -28,6 +28,7 @@
  *
  *   panel -> computer
  *     HELLO littlelx-pi 2 <w> <h> <version>
+ *     INFO fb=<ok|missing> touch=<ok|missing>   (right after each HELLO)
  *     P id / R id                         button press / release
  *     S id value                          bar dragged to value
  *     CALD a b c d e f                    calibration result (store it, send back with K)
@@ -60,6 +61,7 @@
 #include "font.h"
 
 static void klog(const char *msg);
+static void send_hello(void);
 
 #ifndef LLX_VERSION
 #define LLX_VERSION "dev"
@@ -823,7 +825,7 @@ static void handle_line(char *line)
 	set_online(1);
 
 	if (!strcmp(line, "?")) {
-		send_line("HELLO littlelx-pi 2 %d %d %s", W, H, LLX_VERSION);
+		send_hello();
 	} else if (!strcmp(line, "PING")) {
 		/* keep-alive only */
 	} else if (!strcmp(line, "CLR")) {
@@ -1225,7 +1227,7 @@ static int app(void)
 				touch = open_touch();
 		}
 		if (t - last_rx > 2500 && t - last_hello > 2000) {
-			send_line("HELLO littlelx-pi 2 %d %d %s", W, H, LLX_VERSION);
+			send_hello();
 			last_hello = t;
 		}
 		if (upd.active && t - upd.last_rx > 30000) {
@@ -1239,6 +1241,12 @@ static int app(void)
 		if (wdog >= 0)
 			ioctl(wdog, WDIOC_KEEPALIVE, 0);
 	}
+}
+
+static void send_hello(void)
+{
+	send_line("HELLO littlelx-pi 2 %d %d %s", W, H, LLX_VERSION);
+	send_line("INFO fb=%s touch=%s", fbmem ? "ok" : "missing", touch >= 0 ? "ok" : "missing");
 }
 
 /* --------------------------------------------------------------- PID 1 */

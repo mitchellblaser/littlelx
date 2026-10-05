@@ -17,15 +17,18 @@ disable_overscan=1
 camera_auto_detect=0
 display_auto_detect=0
 
-# ---- Display: Waveshare 3.5" (A) / LCD-show style ILI9486 + XPT2046 touch ----
-# rotate=0 or 180 = portrait (swap them if the picture is upside down),
-# 90 or 270 = landscape. The touchscreen layout follows automatically
-# (re-run the touch calibration after changing it).
-# Garbled picture? lower speed to 16000000. Want it snappier? try 32000000.
+# ---- Display: 3.5" 480x320 ILI9486 + XPT2046 touch on the GPIO header ----
+# littlelx35 = the generic "3.5inch RPi Display" boards (goodtft LCD-show
+# "LCD35-show" / tft35a / MPI3501 and clones). Genuine Waveshare 3.5" (A)
+# boards use piscreen instead: swap the # between the two lines below.
+# rotate=0 or 180 = portrait, 90 or 270 = landscape (re-run the touch
+# calibration after changing it). Want it snappier? try speed=24000000 or
+# 32000000; if the picture breaks up, go back down.
 dtparam=spi=on
-dtoverlay=piscreen,speed=24000000,rotate=0,fps=50
+dtoverlay=littlelx35,speed=16000000,rotate=0
+#dtoverlay=piscreen,speed=16000000,rotate=0
 
-# ---- UART to the Mega: GPIO14 = Pi TX, GPIO15 = Pi RX, 115200 baud ----
+# ---- UART to the Mega: GPIO14 = Pi TX, GPIO15 = Pi RX, 500000 baud ----
 # Bluetooth gives the good UART back to the header; wifi is off to save power.
 enable_uart=1
 dtoverlay=disable-bt
@@ -42,6 +45,7 @@ core_freq=450
 sdram_freq=450
 over_voltage=2
 
-# Less power draw (helps a bus-powered Pi): no activity LED, no audio.
-dtparam=act_led_trigger=none
+# Green LED: double-blinking heartbeat = Linux is running.
+# (No blink at all = it isn't booting: try removing the overclock lines.)
+dtparam=act_led_trigger=heartbeat
 dtparam=audio=off
