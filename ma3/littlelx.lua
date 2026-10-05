@@ -16,6 +16,7 @@
 --   "page 3"       select executor page 3
 --   "res Dimmer"   toggle MA's encoder resolution for an attribute (Coarse/Fine)
 --   "probe"        print what this MA version's Lua offers (encoder diagnostics)
+--   "tab Gobo2Pos" encoders show that feature of the group (MA's tabs)
 --   "sets Gobo1"   report the selected fixture's named values for an attribute
 --   "setv Gobo1 3" apply the 3rd of them to the selection
 --   "__start <osc line> <tick> [Attr,Attr] [version]"   start reporting from a
@@ -183,20 +184,32 @@ local function feature_group(feat) -- walk up to the FeatureGroup
 	return nil
 end
 
-local attr_cache = {} -- feature name -> { {name=, pretty=}, ... }
-local function feature_attrs(fname)
-	if attr_cache[fname] then return attr_cache[fname] end
-	local list = {}
+-- The show's attribute definitions, read once: each feature's attributes,
+-- and the features ("tabs") of each feature group in order.
+local defs
+local function attribute_defs()
+	if defs then return defs end
+	defs = { attrs_of = {}, group_of = {}, groups = {} }
 	local ok, attrs = pcall(function() return ShowData().LivePatch.AttributeDefinitions.Attributes:Children() end)
-	if ok and attrs then
-		for _, a in ipairs(attrs) do
-			if oname(prop(a, "Feature", "feature")) == fname then
-				list[#list + 1] = { name = oname(a), pretty = tostring(prop(a, "Pretty", "pretty") or oname(a)) }
+	for _, a in ipairs(ok and attrs or {}) do
+		local fh = prop(a, "Feature", "feature")
+		local fname = oname(fh)
+		if fname then
+			if not defs.attrs_of[fname] then
+				defs.attrs_of[fname] = {}
+				local g = (type(fh) ~= "string" and feature_group(fh)) or ""
+				defs.group_of[fname] = g
+				defs.groups[g] = defs.groups[g] or {}
+				table.insert(defs.groups[g], fname)
 			end
+			table.insert(defs.attrs_of[fname], { name = oname(a), pretty = tostring(prop(a, "Pretty", "pretty") or oname(a)) })
 		end
 	end
-	attr_cache[fname] = list
-	return list
+	return defs
+end
+
+local function feature_attrs(fname)
+	return attribute_defs().attrs_of[fname] or {}
 end
 
 local function fmt_value(v)
@@ -362,10 +375,44 @@ local function apply_set(aname, n)
 	Printf(string.format("littlelx: %s %s -> At %s", aname, set.name, v))
 end
 
+local tab_choice        -- a tab picked on the controller (until MA's own selection changes)
+local ma_feature        -- the feature MA had selected last time
+local has_cache = {}    -- "fixture/feature" -> does the fixture have any of its attributes
+
+local function fixture_has(sf, fname)
+	local key = tostring(sf) .. "/" .. fname
+	if has_cache[key] == nil then
+		has_cache[key] = false
+		for _, a in ipairs(feature_attrs(fname)) do
+			local ai = try(GetAttributeIndex, a.name)
+			if ai and try(GetUIChannelIndex, sf, ai) ~= nil then
+				has_cache[key] = true
+				break
+			end
+		end
+	end
+	return has_cache[key]
+end
+
 local function report_encoders()
 	local feat = try(SelectedFeature)
-	local fname = oname(feat) or ""
+	local mname = oname(feat) or ""
+	if mname ~= ma_feature then -- MA's own tab changed: follow it
+		ma_feature, tab_choice = mname, nil
+	end
+	local group = (feat and feature_group(feat)) or attribute_defs().group_of[mname] or ""
 	local sf = try(SelectionFirst)
+	-- the group's features this fixture has: the tabs (like MA's encoder bar)
+	local tabs = {}
+	if sf ~= nil then
+		for _, f in ipairs(attribute_defs().groups[group] or { mname }) do
+			if fixture_has(sf, f) then tabs[#tabs + 1] = f end
+		end
+	end
+	local fname = mname
+	for _, t in ipairs(tabs) do
+		if t == tab_choice then fname = t end
+	end
 	local list = {}
 	if fname ~= "" and sf ~= nil then -- nothing selected: the encoders have nothing to turn
 		for _, a in ipairs(feature_attrs(fname)) do
@@ -377,11 +424,13 @@ local function report_encoders()
 			end
 		end
 	end
-	local head = fname .. "|" .. (feat and feature_group(feat) or "") .. "|" .. (sf ~= nil and "1" or "0")
+	local head = fname .. "|" .. group .. "|" .. (sf ~= nil and "1" or "0")
 	if changed("feat", head) then
 		send("feat", "s", head)
-		sets_cache = {} -- other feature / selection: read the named values again
+		sets_cache, has_cache = {}, {} -- other feature / selection: look again
 	end
+	local t = table.concat(tabs, "|")
+	if changed("tabs", t) then send("tabs", "s", t) end
 	if changed("encn", #list) then send("encn", "i", #list) end
 	for k, e in ipairs(list) do
 		if changed("enc" .. k, e) then send("enc/" .. k, "s", e) end
@@ -462,6 +511,10 @@ local function probe()
 			local ai = try(GetAttributeIndex, a.name)
 			local ui = ai and try(GetUIChannelIndex, sf, ai)
 			say("sets for", a.name, "attr", ai, "ui", ui)
+			if ui then
+				local pp = try(GetProgPhaser, ui, false)
+				dump("  programmer " .. a.name, type(pp) == "table" and pp[1] or pp)
+			end
 			local cf = channel_function(sf, a.name)
 			say("  channel function found:", cf ~= nil and (cls(cf) .. " " .. tostring(oname(cf))) or "no")
 			local found = {}
@@ -576,6 +629,12 @@ local function act(arg)
 	end
 	if verb == "probe" then
 		probe()
+		return
+	end
+	if verb == "tab" then -- "tab Gobo2Pos": the encoders show that feature
+		tab_choice = rest
+		last["feat"] = nil
+		report_encoders()
 		return
 	end
 	if verb == "sets" then -- "sets Gobo1": report its named values

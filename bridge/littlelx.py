@@ -725,6 +725,7 @@ class Screen:
     KEY0 = 40
     ENC0 = 66      # encoders page: 10 ids per encoder
     ENC_FEAT, ENC_PAGE = 86, 87
+    ENC_TAB0, TABS_SHOWN = 88, 4   # feature tabs (the last one pages when there are more)
     BACK = 120
     SET_TITLE, SET_RESET, SET_MORE = 121, 122, 123
     SET0 = 125     # setup grids (keys, functions, digits); named values from SET0 + 20
@@ -750,6 +751,9 @@ class Screen:
         self.sets_page = 0
         self.sets_rows = 3
         self.sets_sel = -1     # highlighted named value (encoder turns move it)
+        self.enc_tabs = False  # encoders page drawn with a tab row
+        self.tab_page = 0
+        self.tab_paged = False  # tabs paged by hand: don't jump back to the current one
         self.cmdline = ""      # local command line (used when MA isn't linked)
         self.keymap = {}
         self.w, self.h = 320, 480
@@ -951,6 +955,13 @@ class Screen:
         self.keymap[self.ENC_PAGE] = {"encpage": 1}
         self.widget(self.ENC_PAGE, "B", w - 92, top, 88, 40, C_KEY2, C_TEXT, C_BTN_ON, 1, 0, 0, "")
         top += 46
+        # the feature group's tabs (Gobo2, Gobo2Pos, ...), like MA's encoder bar
+        self.enc_tabs = self.enc_mode and len(b.ma["tabs"]) > 1
+        if self.enc_tabs:
+            tw = (w - 4) // self.TABS_SHOWN
+            for n in range(self.TABS_SHOWN):
+                self.widget(self.ENC_TAB0 + n, "B", 4 + n * tw, top, tw - 3, 34, C_BTN, C_TEXT, C_BTN_ON, 0, 0, 0, "")
+            top += 38
         ph = (self.h - 62 - top) // 2
         hw = b.cfg["hw"]["encoders"]
         for i in range(2):
@@ -967,6 +978,30 @@ class Screen:
         self.back_button()
         self.update_encoders()
 
+    def show_tabs(self):
+        """Fill the tab buttons: the current tab lit; with more tabs than fit, the
+        last button pages through the rest."""
+        tabs, cur = self.b.ma["tabs"], self.b.ma["feat"][0]
+        n_btn = self.TABS_SHOWN
+        paged = len(tabs) > n_btn
+        per = n_btn - 1 if paged else n_btn
+        pages = max(1, -(-len(tabs) // per))
+        if cur in tabs and not self.tab_paged:  # show the page with the current tab
+            self.tab_page = tabs.index(cur) // per
+        self.tab_page %= pages
+        shown = tabs[self.tab_page * per:(self.tab_page + 1) * per]
+        for n in range(n_btn):
+            wid = self.ENC_TAB0 + n
+            if paged and n == n_btn - 1:
+                self.keymap[wid] = {"tabpage": 1}
+                self.setw(wid, value=0, text=f"more {self.tab_page + 1}/{pages}", colors=(C_KEY2, C_TEXT, C_BTN_ON))
+            elif n < len(shown):
+                self.keymap[wid] = {"tab": shown[n]}
+                self.setw(wid, value=1 if shown[n] == cur else 0, text=shown[n][:12], colors=(C_BTN, C_TEXT, C_BTN_ON))
+            else:
+                self.keymap.pop(wid, None)
+                self.setw(wid, value=0, text="", colors=(C_PANEL, C_DIM, C_PANEL))
+
     def update_encoders(self):
         if self.name.startswith("entry"):  # typing a value: keep MA's current one fresh
             self.setw(self.SET_TITLE, text=self.value_title(int(self.name[5:])))
@@ -974,15 +1009,19 @@ class Screen:
         if self.name != "encoders":
             return
         b = self.b
-        if b.ma_encoders_on() != self.enc_mode:  # MA started/stopped giving encoders: new layout
+        if (b.ma_encoders_on() != self.enc_mode or  # MA started/stopped giving encoders: new layout
+                (b.ma_encoders_on() and (len(b.ma["tabs"]) > 1) != self.enc_tabs)):
             self.draw_encoders()
             return
+        if self.enc_tabs:
+            self.show_tabs()
         ma = b.ma
         fname, group, has_sel = ma["feat"]
         gcolor = FEATURE_COLORS.get(group.lower(), FEATURE_COLORS.get(fname.lower(), C_KEY2))
         pages = b.enc_pages()
         if self.enc_mode:
-            self.setw(self.ENC_FEAT, text=" " + fname, colors=(shade(gcolor, 0.55), C_TEXT, C_PANEL))
+            title = group if self.enc_tabs and group else fname
+            self.setw(self.ENC_FEAT, text=" " + title, colors=(shade(gcolor, 0.55), C_TEXT, C_PANEL))
             self.setw(self.ENC_PAGE, text=f"{b.enc_page + 1}/{pages}",
                       colors=(C_KEY2, C_TEXT if pages > 1 else C_DIM, C_BTN_ON))
         else:
@@ -1419,12 +1458,20 @@ class Screen:
                             f"key{self.name[4:]}" if self.name.startswith("exec") else "main")
         elif "encpage" in act:
             self.b.next_enc_page()
+        elif "tab" in act:
+            self.b.ma_plugin(f"tab {act['tab']}")  # MA's report switches the encoders
+            self.b.enc_page = 0
+            self.tab_paged = False
+        elif "tabpage" in act:
+            self.tab_page += 1
+            self.tab_paged = True
+            self.show_tabs()
         else:
             self.b.do_action(act, True)
 
     def on_release(self, wid):
         act = self.keymap.get(wid)
-        if act and not any(k in act for k in ("keypad", "back", "encpage", "edit", "assign",
+        if act and not any(k in act for k in ("keypad", "back", "encpage", "tab", "tabpage", "edit", "assign",
                                               "digit", "reset_keys", "entry", "vkey", "setv", "setpage")):
             self.b.do_action(act, False)
 
@@ -1509,7 +1556,8 @@ class Bridge:
         self.ma = dict(alive=0.0, page=None, fader={}, run={}, name={}, master={}, cmdline="",
                        busy="", busy_at=0.0, res={}, color={},
                        feat=("", "", False), encn=0, encs={}, ver=None, linked_at=0.0,
-                       sets={})  # attribute -> named values of the selected fixture  # MA's encoders (see report_encoders)
+                       sets={},  # attribute -> named values of the selected fixture
+                       tabs=[])  # the feature group's features the fixture has  # MA's encoders (see report_encoders)
         self.keys_down = set()               # hardware keys whose press was acted on
         self.enc_page = 0                    # which pair of MA's encoders the hardware ones follow
         self.enc_edge_at = [0.0, 0.0]        # encoder click-size auto-detection
@@ -2069,8 +2117,15 @@ class Bridge:
                 scr.update_cmdline()
         elif what == "feat":
             p = (str(val or "") + "||").split("|")
+            if p[0] != ma["feat"][0]:
+                self.enc_page = 0  # another feature (tab): start at its first pair
             ma["feat"] = (p[0], p[1], p[2] == "1")
             if scr:
+                scr.update_encoders()
+        elif what == "tabs":
+            ma["tabs"] = [t for t in str(val or "").split("|") if t]
+            if scr:
+                scr.tab_paged = False
                 scr.update_encoders()
         elif what == "encn":
             ma["encn"] = int(val or 0)
