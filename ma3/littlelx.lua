@@ -30,6 +30,13 @@ local GENVAR = "littlelx_gen"       -- bumps on every (re)start; old timers stop
 
 local last = {}
 
+-- MA3's tonumber only accepts strings: never hand it a number.
+local function num(v)
+	if type(v) == "number" then return v end
+	if type(v) == "string" then return tonumber(v) end
+	return nil
+end
+
 -- OSC strings travel inside SendOSC's quotes, separated by commas: keep
 -- them out of the value.
 local function clean(s)
@@ -127,7 +134,7 @@ local function act(arg)
 	local verb, rest = arg:match("^(%S+)%s*(.*)$")
 	verb = (verb or ""):lower()
 	if verb == "page" then
-		local n = tonumber(rest)
+		local n = num(rest)
 		if n and n >= 1 then Cmd("Page " .. math.floor(n)) end
 		return
 	end
@@ -169,12 +176,12 @@ end
 -- Bridge install: no plugin object, so run from MA's Timer. The Timer API
 -- documents a whole-second delay; try our tick first, fall back to 1 s.
 local function start_timer(line, tick_s)
-	OSC_LINE = tonumber(line) or OSC_LINE
-	TICK = tonumber(tick_s) or TICK
-	local gen = (tonumber(GetVar(GlobalVars(), GENVAR)) or 0) + 1
+	OSC_LINE = num(line) or OSC_LINE
+	TICK = num(tick_s) or TICK
+	local gen = (num(GetVar(GlobalVars(), GENVAR)) or 0) + 1
 	SetVar(GlobalVars(), GENVAR, gen)
 	local function step()
-		if tonumber(GetVar(GlobalVars(), GENVAR)) == gen then
+		if num(GetVar(GlobalVars(), GENVAR)) == gen then
 			tick()
 		end
 	end
@@ -203,7 +210,7 @@ local function main(display, arg)
 		return
 	end
 	SetVar(GlobalVars(), RUNVAR, true)
-	SetVar(GlobalVars(), GENVAR, (tonumber(GetVar(GlobalVars(), GENVAR)) or 0) + 1) -- stop timers
+	SetVar(GlobalVars(), GENVAR, (num(GetVar(GlobalVars(), GENVAR)) or 0) + 1) -- stop timers
 	Printf("littlelx: reporting to OSC line " .. OSC_LINE)
 	report(true)
 	while GetVar(GlobalVars(), RUNVAR) do

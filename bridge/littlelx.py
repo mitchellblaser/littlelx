@@ -950,10 +950,12 @@ class Bridge:
     # llx_1..llx_N (each prefixed with 'x' so MA never mistakes one for a
     # number; MA drops empty strings and may limit long ones). This Lua
     # rebuilds it and calls it with an argument.
-    MA_RUN = ("local g=GlobalVars() local n=tonumber(GetVar(g,'llx_n')) if n then "
-              "local t={} for i=1,n do t[i]=string.sub(tostring(GetVar(g,'llx_'..i)),2) end "
-              "local c=table.concat(t):gsub('..',function(x) return string.char(tonumber(x,16)) end) "
-              "load(c)()(nil,'{arg}') end")
+    MA_RUN = ("local g=GlobalVars() local n=GetVar(g,'llx_n') "
+              "if type(n)=='string' then n=tonumber(n) end "  # MA's tonumber only takes strings
+              "if n then local t={} for i=1,n do local h=tostring(GetVar(g,'llx_'..i)) "
+              "for k=2,#h-1,2 do local a,b=h:byte(k,k+1) "
+              "t[#t+1]=string.char(((a>96 and a-87 or a-48)<<4)|(b>96 and b-87 or b-48)) end end "
+              "load(table.concat(t))()(nil,'{arg}') end")
 
     def ma_plugin(self, arg):
         """Run an action in the littlelx code installed in MA (see ma3/littlelx.lua)."""
