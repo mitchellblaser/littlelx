@@ -46,10 +46,32 @@ CONFIG_BCM2835_WDT=y
 # CONFIG_NAMESPACES is not set
 # CONFIG_AUDIT is not set
 CONFIG_EXPERT=y
-# Linux never touches the SD card or USB: the card cannot be corrupted by a
-# power cut, and the Pi 3's USB controller (thousands of IRQs/s) stays idle.
-# CONFIG_BLOCK is not set
-# CONFIG_MMC is not set
+# SD card + FAT: only used while an update is being written (the card is not
+# even mounted otherwise). USB stays off: the Pi 3's USB controller fires
+# thousands of IRQs/s for nothing.
+CONFIG_BLOCK=y
+CONFIG_MSDOS_PARTITION=y
+CONFIG_MMC=y
+CONFIG_MMC_BLOCK=y
+CONFIG_MMC_BCM2835_SDHOST=y
+CONFIG_FAT_FS=y
+CONFIG_VFAT_FS=y
+CONFIG_FAT_DEFAULT_IOCHARSET="ascii"
+CONFIG_NLS=y
+CONFIG_NLS_CODEPAGE_437=y
+# CONFIG_EXT2_FS is not set
+# CONFIG_EXT3_FS is not set
+# CONFIG_XFS_FS is not set
+# CONFIG_F2FS_FS is not set
+# CONFIG_GFS2_FS is not set
+# CONFIG_JFS_FS is not set
+# CONFIG_NILFS2_FS is not set
+# CONFIG_BLK_DEV_LOOP is not set
+# CONFIG_BLK_DEV_NBD is not set
+# CONFIG_BLK_DEV_RAM is not set
+# CONFIG_BLK_DEV_DM is not set
+# CONFIG_SCSI is not set
+# CONFIG_ATA is not set
 # CONFIG_USB_SUPPORT is not set
 # CONFIG_HID is not set
 # CONFIG_INPUT_KEYBOARD is not set
@@ -59,3 +81,19 @@ CONFIG_EXPERT=y
 # CONFIG_IIO is not set
 # CONFIG_KEYS is not set
 # CONFIG_MAGIC_SYSRQ is not set
+# Only FAT is needed (for updates); drop every other filesystem
+# CONFIG_REISERFS_FS is not set
+# CONFIG_BCACHEFS_FS is not set
+# CONFIG_AUTOFS_FS is not set
+# CONFIG_FUSE_FS is not set
+# CONFIG_OVERLAY_FS is not set
+# CONFIG_ISO9660_FS is not set
+# CONFIG_UDF_FS is not set
+# CONFIG_EXFAT_FS is not set
+# CONFIG_NTFS3_FS is not set
+# CONFIG_ECRYPT_FS is not set
+# CONFIG_MISC_FILESYSTEMS is not set
+# CONFIG_MTD is not set
+# CONFIG_BLK_DEBUG_FS is not set
+# CONFIG_FS_ENCRYPTION is not set
+# CONFIG_QUOTA is not set

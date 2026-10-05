@@ -3,7 +3,13 @@
 
 start_file=start_cd.elf
 fixup_file=fixup_cd.dat
+
+# Which copy of the OS to boot: a/ or b/. Updates over USB write the other
+# copy and then change this one letter. If an update ever leaves the panel
+# dead, change it back by hand.
+os_prefix=a/
 kernel=zImage
+initramfs littlelx.cpio.gz followkernel
 gpu_mem=16
 boot_delay=0
 disable_splash=1

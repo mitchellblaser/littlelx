@@ -32,12 +32,13 @@ the wiring learner, so it isn't the default.
 
 ## The Pi image: small, read-only, safe to unplug
 
-* The **entire OS is one file on a single FAT partition**: a ~4 MB kernel with the
-  app built in as its initramfs. The app *is* `/init`. There is no shell, no
-  BusyBox, no libraries and no other processes.
-* Linux runs **entirely from RAM**. The kernel has **no SD-card driver at all**, so
-  after the firmware loads the kernel, nothing can ever write to (or corrupt) the
-  card. Pull the power whenever you like.
+* The **entire OS is two files on a single FAT partition**: a ~5 MB kernel and a
+  ~200 KB initramfs that holds only the app. The app *is* `/init`. There is no
+  shell, no BusyBox, no libraries and no other processes.
+* Linux runs **entirely from RAM**. The SD card isn't even mounted in normal
+  use, so nothing writes to it and it can't be corrupted. Pull the power
+  whenever you like. The card is only written during an update you start
+  (below), and that is power-cut-safe too.
 * No modules, no networking, no USB, no Wi-Fi/Bluetooth, no HDMI console. The
   Pi 3's USB controller normally fires thousands of interrupts a second; with it
   gone the CPU is free for the UI.
@@ -133,6 +134,28 @@ shortcut to `littlelx.exe` in `shell:startup` (Win+R → `shell:startup`).
 
 It reconnects by itself when the controller is unplugged and plugged back in.
 
+## Updating the touchscreen over USB
+
+No need to take the SD card out. Stop the bridge if it's running, then:
+
+```sh
+python3 bridge/littlelx.py --update-pi littlelx-pi-update.zip   # Windows: littlelx.exe --update-pi ...
+```
+
+`littlelx-pi-update.zip` comes from the same build as the SD image (GitHub
+Actions artifact *littlelx-pi-update*, or `pi/out/` when building yourself).
+Only changed files are sent: an app-only update takes a few seconds, a kernel
+update a few minutes. The screen shows the progress, and the bridge prints the
+old and new version.
+
+How it stays safe: the card holds two copies of the OS, `a/` and `b/`.
+`config.txt` picks one (`os_prefix=a/`). The update writes the *other* copy,
+checks every file's CRC, and only then changes that single letter and reboots.
+If the power or USB goes during an update, the old copy is untouched and still
+boots. Just run the update again. If a new version itself turns out to be
+broken, put the card in a computer and change `os_prefix=` back to the other
+letter.
+
 ## Default layout (all of it is editable in `~/.littlelx.json`)
 
 | Control | Does |
@@ -160,12 +183,12 @@ On Debian or Ubuntu (or let GitHub Actions do it, see `.github/workflows/build.y
 ```sh
 sudo apt install gcc-arm-linux-gnueabihf libc6-dev-armhf-cross make flex bison bc \
                  libssl-dev dosfstools mtools fdisk git curl
-./pi/build.sh        # -> pi/out/littlelx-sdcard.img(.gz)
+./pi/build.sh        # -> pi/out/littlelx-sdcard.img(.gz) + littlelx-pi-update.zip
 ```
 
-This builds the Raspberry Pi kernel (`rpi-6.12.y`) with `pi/kernel.fragment`, embeds the
-statically linked `pi/app` as `/init`, and adds the Pi firmware (cut-down
-`start_cd.elf`) plus `pi/boot/config.txt`.
+This builds the Raspberry Pi kernel (`rpi-6.12.y`) with `pi/kernel.fragment`,
+packs the statically linked `pi/app` as `/init` into `littlelx.cpio.gz`, and
+adds the Pi firmware (cut-down `start_cd.elf`) plus `pi/boot/config.txt`.
 
 The panel app also builds and runs on a normal Linux PC for testing:
 `cc -O2 -o llx pi/app/littlelx.c && ./llx --render out.ppm 320x480 < script.txt`
@@ -178,4 +201,5 @@ renders a list of protocol lines to an image. To boot-test the image in QEMU
 
 * Mega ⇄ bridge: see the header of `mega/littlelx_mega/littlelx_mega.ino`
 * Pi ⇄ bridge (tunnelled through the Mega as lines starting with `>`): see the
-  header of `pi/app/littlelx.c`
+  header of `pi/app/littlelx.c`, including the `UPD` update commands
+* Speeds: USB 500000 baud, Mega ⇄ Pi 500000 baud

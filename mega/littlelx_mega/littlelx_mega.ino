@@ -7,7 +7,7 @@
  *   - relays the Raspberry Pi touchscreen, which hangs off one of the Mega's
  *     hardware serial ports (auto-detected: Serial1, Serial2 or Serial3).
  *
- * USB protocol (115200 baud, text lines):
+ * USB protocol (500000 baud, text lines):
  *   Mega -> computer
  *     HELLO littlelx-mega 1
  *     PI <n>              Pi found on Serial<n> (0 = not found yet)
@@ -18,7 +18,8 @@
  *     ?                   HELLO, PI and a dump of every input
  *     M<pin> <mode>       0 off, 1 input, 2 input+pullup, 3 analog (A0-A15 only)
  *                         add 8 for no debounce (rotary encoders)
- *     ><text>             send line to the Pi
+ *     ><text>             send line to the Pi (streamed through byte by byte,
+ *                         so lines of any length and full-speed updates work)
  *
  * Defaults: D2-D53 = input+pullup (debounced), A0-A15 = analog.
  * Pins 0/1 (USB) and 14-19 (serial ports) are left alone until the Pi is found;
@@ -52,6 +53,7 @@ static uint8_t pi_port = 0;
 
 static char usb_buf[160];
 static uint8_t usb_len;
+static bool usb_to_pi;   /* inside a ">..." line: pass bytes straight through */
 static char pi_buf[4][160];
 static uint8_t pi_len[4];
 
@@ -147,12 +149,7 @@ static void lock_pi(uint8_t n)
 
 static void usb_line(char *s)
 {
-	if (s[0] == '>') {
-		if (pi_port) {
-			ports[pi_port]->print(s + 1);
-			ports[pi_port]->print('\n');
-		}
-	} else if (s[0] == '?') {
+	if (s[0] == '?') {
 		dump_all();
 	} else if (s[0] == 'M') {
 		char *sp;
@@ -185,6 +182,17 @@ static void poll_serial()
 {
 	while (Serial.available()) {
 		char c = Serial.read();
+		if (usb_to_pi) {
+			if (pi_port)
+				ports[pi_port]->write(c);
+			if (c == '\n')
+				usb_to_pi = false;
+			continue;
+		}
+		if (c == '>' && usb_len == 0) {
+			usb_to_pi = true;
+			continue;
+		}
 		if (c == '\r')
 			continue;
 		if (c == '\n') {
@@ -290,7 +298,7 @@ static void scan_analog()
 
 void setup()
 {
-	Serial.begin(115200);
+	Serial.begin(500000);
 	for (uint8_t n = 1; n <= 3; n++) {
 		ports[n]->begin(PI_BAUD);
 		tx_enable(n, false); /* listen only until we know where the Pi is */

@@ -24,9 +24,10 @@
  *     D id                                delete widget
  *     K a b c d e f                       touch calibration: x=a*rx+b*ry+c, y=d*rx+e*ry+f
  *     CAL                                 run touch calibration on the panel
+ *     UPD ...                             firmware update, see "update" below
  *
  *   panel -> computer
- *     HELLO littlelx-pi 1 <w> <h>
+ *     HELLO littlelx-pi 2 <w> <h> <version>
  *     P id / R id                         button press / release
  *     S id value                          bar dragged to value
  *     CALD a b c d e f                    calibration result (store it, send back with K)
@@ -35,6 +36,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <ftw.h>
 #include <linux/fb.h>
 #include <linux/input.h>
 #include <linux/watchdog.h>
@@ -56,6 +58,12 @@
 #include <unistd.h>
 
 #include "font.h"
+
+static void klog(const char *msg);
+
+#ifndef LLX_VERSION
+#define LLX_VERSION "dev"
+#endif
 
 #define MAXW 160
 #define TEXTMAX 96
@@ -93,6 +101,20 @@ static int cal_raw[3][2];
 
 static int touch_id = -1; /* widget being touched */
 static int touch_down, raw_x, raw_y, have_x, have_y;
+
+static struct {
+	int active;
+	char cur, spare;
+	long cfg_off;
+	long total, done;
+	int files_ok;
+	int fd;
+	char path[160];
+	long size, got;
+	uint32_t want, crc;
+	long long last_rx;
+	int pct;
+} upd = { .fd = -1 };
 
 static const font_t *fonts[3] = { &font_small, &font_medium, &font_large };
 
@@ -333,6 +355,17 @@ static void paint_region(void)
 		draw_cross(cal_pts[cal_step][0] * W / 100, cal_pts[cal_step][1] * H / 100, 0xffcc00);
 		return;
 	}
+	if (upd.active) {
+		char msg[64];
+		int bw = W - 60, fillw = bw * (upd.pct < 0 ? 0 : upd.pct) / 100;
+		fill(0, 0, W, H, 0x101418);
+		draw_text_box(0, H / 2 - 60, W, 30, 1, 0, 0xffffff, "Updating firmware");
+		fill(30, H / 2 - 12, bw, 24, 0x2a3340);
+		fill(30, H / 2 - 12, fillw, 24, 0x2f7de1);
+		snprintf(msg, sizeof(msg), "%d%%   (unplugging now keeps the old version)", upd.pct < 0 ? 0 : upd.pct);
+		draw_text_box(0, H / 2 + 20, W, 24, 0, 0, 0x8899aa, msg);
+		return;
+	}
 	if (!online) {
 		fill(0, 0, W, H, 0x101418);
 		draw_text_box(0, H / 2 - 50, W, 40, 2, 0, 0xffffff, "littlelx");
@@ -432,6 +465,355 @@ static void set_online(int on)
 	}
 }
 
+/* ---------------------------------------------------------------- update
+ *
+ * The SD card holds two complete copies of the OS, in a/ and b/, and
+ * config.txt says which one the firmware boots ("os_prefix=a/"). An update
+ * writes the other slot, checks every file, then flips that single byte and
+ * reboots. A power cut at any point leaves the running slot untouched.
+ * The card is only mounted while this runs.
+ *
+ *   UPD BEGIN <bytes>             mount, wipe the spare slot   -> UPD READY
+ *   UPD FILE <path> <size> <crc>  -> UPD HAVE <path> (copied from the running
+ *                                    slot, identical) or UPD SEND <path>
+ *   UPD DATA <base64>             -> UPD ACK <bytes so far>, then UPD OK <path>
+ *   UPD COMMIT <files>            switch slots, reboot         -> UPD DONE
+ *   UPD ABORT                     give up, nothing changes     -> UPD ABORTED
+ *   errors: UPD FAIL <reason>
+ */
+static const char *boot = "/boot"; /* LLX_BOOTDIR=dir: use a plain directory (tests) */
+
+
+static uint32_t crc_table[256];
+
+static uint32_t crc32_update(uint32_t crc, const uint8_t *p, size_t n)
+{
+	if (!crc_table[1])
+		for (uint32_t i = 0; i < 256; i++) {
+			uint32_t c = i;
+			for (int k = 0; k < 8; k++)
+				c = c & 1 ? 0xedb88320 ^ (c >> 1) : c >> 1;
+			crc_table[i] = c;
+		}
+	crc = ~crc;
+	while (n--)
+		crc = crc_table[(crc ^ *p++) & 255] ^ (crc >> 8);
+	return ~crc;
+}
+
+static int b64_decode(const char *in, uint8_t *out)
+{
+	int n = 0, bits = 0;
+	uint32_t acc = 0;
+	for (; *in && *in != '='; in++) {
+		int v;
+		char c = *in;
+		if (c >= 'A' && c <= 'Z') v = c - 'A';
+		else if (c >= 'a' && c <= 'z') v = c - 'a' + 26;
+		else if (c >= '0' && c <= '9') v = c - '0' + 52;
+		else if (c == '+') v = 62;
+		else if (c == '/') v = 63;
+		else return -1;
+		acc = (acc << 6) | v;
+		bits += 6;
+		if (bits >= 8) {
+			bits -= 8;
+			out[n++] = acc >> bits;
+		}
+	}
+	return n;
+}
+
+static void slot_path(char *dst, size_t len, char slot, const char *rel)
+{
+	snprintf(dst, len, "%s/%c/%s", boot, slot, rel);
+}
+
+static void mkdirs(const char *path) /* create parent directories of path */
+{
+	char tmp[200];
+	snprintf(tmp, sizeof(tmp), "%s", path);
+	for (char *p = tmp + 1; *p; p++)
+		if (*p == '/') {
+			*p = 0;
+			mkdir(tmp, 0755);
+			*p = '/';
+		}
+}
+
+static int rm_entry(const char *path, const struct stat *st, int flag, struct FTW *ftw)
+{
+	(void)st; (void)flag; (void)ftw;
+	return remove(path);
+}
+
+static void upd_repaint(void)
+{
+	int pct = upd.total ? (int)(upd.done * 100 / upd.total) : 0;
+	if (pct != upd.pct) {
+		upd.pct = pct;
+		mark_all();
+	}
+}
+
+static void upd_close(void)
+{
+	if (upd.fd >= 0)
+		close(upd.fd);
+	upd.fd = -1;
+	sync();
+	if (!getenv("LLX_BOOTDIR"))
+		umount(boot);
+	upd.active = 0;
+	mark_all();
+}
+
+static void upd_fail(const char *why)
+{
+	send_line("UPD FAIL %s", why);
+	klog(why);
+	if (upd.active)
+		upd_close();
+}
+
+static void upd_begin(long total)
+{
+	if (upd.active)
+		upd_close();
+	memset(&upd, 0, sizeof(upd));
+	upd.fd = -1;
+	upd.pct = -1;
+	int ok = -1;
+	if (getenv("LLX_BOOTDIR")) {
+		boot = getenv("LLX_BOOTDIR");
+		ok = 0;
+	} else {
+		mkdir(boot, 0755);
+	}
+	for (int i = 0; i < 50 && ok; i++) { /* SD card may still be probing */
+		ok = mount("/dev/mmcblk0p1", boot, "vfat", MS_NOATIME, "");
+		if (ok)
+			usleep(100000);
+	}
+	if (ok) {
+		upd_fail("cannot-mount-sd-card");
+		return;
+	}
+	upd.active = 1;
+	char cfg[200];
+	snprintf(cfg, sizeof(cfg), "%s/config.txt", boot);
+	FILE *f = fopen(cfg, "r");
+	char line[256];
+	long off = 0;
+	upd.cfg_off = -1;
+	while (f && fgets(line, sizeof(line), f)) {
+		if (!strncmp(line, "os_prefix=", 10) && (line[10] == 'a' || line[10] == 'b') && line[11] == '/') {
+			upd.cfg_off = off + 10;
+			upd.cur = line[10];
+		}
+		off += strlen(line);
+	}
+	if (f)
+		fclose(f);
+	if (upd.cfg_off < 0) {
+		upd_fail("no-os_prefix-in-config.txt");
+		return;
+	}
+	upd.spare = upd.cur == 'a' ? 'b' : 'a';
+	char dir[40];
+	snprintf(dir, sizeof(dir), "%.24s/%c", boot, upd.spare);
+	nftw(dir, rm_entry, 16, FTW_DEPTH | FTW_PHYS);
+	mkdir(dir, 0755);
+	upd.total = total > 0 ? total : 1;
+	upd.last_rx = now_ms();
+	upd_repaint();
+	send_line("UPD READY %c", upd.spare);
+}
+
+static int valid_rel(const char *p)
+{
+	if (!*p || *p == '/' || strstr(p, ".."))
+		return 0;
+	for (; *p; p++)
+		if (!((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') || (*p >= '0' && *p <= '9') ||
+		      *p == '.' || *p == '_' || *p == '-' || *p == '/'))
+			return 0;
+	return 1;
+}
+
+static void upd_finish_file(void)
+{
+	char part[220], dst[200];
+	fsync(upd.fd);
+	close(upd.fd);
+	upd.fd = -1;
+	slot_path(dst, sizeof(dst), upd.spare, upd.path);
+	snprintf(part, sizeof(part), "%s.part", dst);
+	if (upd.crc != upd.want) {
+		upd_fail("checksum-mismatch");
+		return;
+	}
+	if (rename(part, dst)) {
+		upd_fail("rename-failed");
+		return;
+	}
+	upd.files_ok++;
+	send_line("UPD OK %s", upd.path);
+}
+
+/* Copy an identical file from the running slot instead of sending it. */
+static int upd_copy_same(const char *rel, long size, uint32_t want)
+{
+	char src[200], dst[200];
+	uint8_t buf[8192];
+	struct stat st;
+	slot_path(src, sizeof(src), upd.cur, rel);
+	slot_path(dst, sizeof(dst), upd.spare, rel);
+	if (stat(src, &st) || st.st_size != size)
+		return 0;
+	int in = open(src, O_RDONLY);
+	if (in < 0)
+		return 0;
+	uint32_t crc = 0;
+	int n;
+	while ((n = read(in, buf, sizeof(buf))) > 0)
+		crc = crc32_update(crc, buf, n);
+	if (crc != want) {
+		close(in);
+		return 0;
+	}
+	lseek(in, 0, SEEK_SET);
+	mkdirs(dst);
+	int out = open(dst, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+	if (out < 0) {
+		close(in);
+		return 0;
+	}
+	crc = 0;
+	while ((n = read(in, buf, sizeof(buf))) > 0) {
+		if (write(out, buf, n) != n)
+			break;
+		crc = crc32_update(crc, buf, n);
+	}
+	fsync(out);
+	close(out);
+	close(in);
+	return crc == want;
+}
+
+static void upd_file(const char *rel, long size, uint32_t want)
+{
+	char part[200];
+	if (!upd.active || upd.fd >= 0) {
+		upd_fail("unexpected-FILE");
+		return;
+	}
+	if (!valid_rel(rel) || strlen(rel) >= sizeof(upd.path)) {
+		upd_fail("bad-path");
+		return;
+	}
+	if (upd_copy_same(rel, size, want)) {
+		upd.files_ok++;
+		send_line("UPD HAVE %s", rel);
+		return;
+	}
+	strcpy(upd.path, rel);
+	upd.size = size;
+	upd.got = 0;
+	upd.want = want;
+	upd.crc = 0;
+	slot_path(part, sizeof(part), upd.spare, rel);
+	strcat(part, ".part");
+	mkdirs(part);
+	upd.fd = open(part, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+	if (upd.fd < 0) {
+		upd_fail("cannot-create-file");
+		return;
+	}
+	send_line("UPD SEND %s", rel);
+	if (size == 0)
+		upd_finish_file();
+}
+
+static void upd_data(const char *b64)
+{
+	uint8_t buf[256];
+	if (!upd.active || upd.fd < 0) {
+		upd_fail("unexpected-DATA");
+		return;
+	}
+	int n = strlen(b64) <= 340 ? b64_decode(b64, buf) : -1;
+	if (n < 0 || upd.got + n > upd.size) {
+		upd_fail("bad-data");
+		return;
+	}
+	if (write(upd.fd, buf, n) != n) {
+		upd_fail("write-failed-card-full");
+		return;
+	}
+	upd.crc = crc32_update(upd.crc, buf, n);
+	upd.got += n;
+	upd.done += n;
+	send_line("UPD ACK %ld", upd.got);
+	upd_repaint();
+	if (upd.got == upd.size)
+		upd_finish_file();
+}
+
+static void upd_commit(int files)
+{
+	if (!upd.active || upd.fd >= 0 || files != upd.files_ok || files < 1) {
+		upd_fail("incomplete-update");
+		return;
+	}
+	char cfg[200];
+	sync();
+	snprintf(cfg, sizeof(cfg), "%s/config.txt", boot);
+	int fd = open(cfg, O_RDWR);
+	if (fd < 0 || pwrite(fd, &upd.spare, 1, upd.cfg_off) != 1) {
+		if (fd >= 0)
+			close(fd);
+		upd_fail("cannot-switch-slot");
+		return;
+	}
+	fsync(fd);
+	close(fd);
+	upd.done = upd.total;
+	send_line("UPD DONE %c", upd.spare);
+	klog("update installed, rebooting");
+	sync();
+	if (getenv("LLX_BOOTDIR")) { /* test mode: don't reboot the PC */
+		upd.active = 0;
+		mark_all();
+		return;
+	}
+	umount(boot);
+	sync();
+	tcdrain(tty);
+	reboot(RB_AUTOBOOT);
+}
+
+static void upd_line(char *args)
+{
+	char *f[3];
+	upd.last_rx = now_ms();
+	if (!strncmp(args, "BEGIN", 5)) {
+		upd_begin(atol(args + 5));
+	} else if (!strncmp(args, "FILE ", 5)) {
+		char *rest = fields(args + 5, f, 3);
+		(void)rest;
+		upd_file(f[0], atol(f[1]), (uint32_t)strtoul(f[2], NULL, 16));
+	} else if (!strncmp(args, "DATA ", 5)) {
+		upd_data(args + 5);
+	} else if (!strncmp(args, "COMMIT", 6)) {
+		upd_commit(atoi(args + 6));
+	} else if (!strncmp(args, "ABORT", 5)) {
+		if (upd.active)
+			upd_close();
+		send_line("UPD ABORTED");
+	}
+}
+
 static void handle_line(char *line)
 {
 	char *f[12];
@@ -441,7 +823,7 @@ static void handle_line(char *line)
 	set_online(1);
 
 	if (!strcmp(line, "?")) {
-		send_line("HELLO littlelx-pi 1 %d %d", W, H);
+		send_line("HELLO littlelx-pi 2 %d %d %s", W, H, LLX_VERSION);
 	} else if (!strcmp(line, "PING")) {
 		/* keep-alive only */
 	} else if (!strcmp(line, "CLR")) {
@@ -451,6 +833,8 @@ static void handle_line(char *line)
 	} else if (!strncmp(line, "BG ", 3)) {
 		screen_bg = hex(line + 3);
 		mark_all();
+	} else if (!strncmp(line, "UPD ", 4)) {
+		upd_line(line + 4);
 	} else if (!strcmp(line, "CAL")) {
 		start_calibration();
 	} else if (line[0] == 'W' && line[1] == ' ') {
@@ -778,8 +1162,6 @@ static int test_render(const char *out)
 	return 0;
 }
 
-static void klog(const char *msg);
-
 static int app(void)
 {
 	const char *ttyp = getenv("LLX_TTY") ? getenv("LLX_TTY") : "/dev/ttyAMA0";
@@ -806,12 +1188,12 @@ static int app(void)
 	}
 	tty = open_tty(ttyp);
 	touch = open_touch();
-	int klog = open("/dev/kmsg", O_WRONLY | O_CLOEXEC);
-	if (klog >= 0) {
-		dprintf(klog, "littlelx: %dx%d fb=%s tty=%s touch=%s watchdog=%s\n", W, H,
+	int kfd = open("/dev/kmsg", O_WRONLY | O_CLOEXEC);
+	if (kfd >= 0) {
+		dprintf(kfd, "littlelx: %dx%d fb=%s tty=%s touch=%s watchdog=%s\n", W, H,
 			fbmem ? "ok" : "MISSING", tty >= 0 ? "ok" : "MISSING",
 			touch >= 0 ? "ok" : "MISSING", wdog >= 0 ? "ok" : "none");
-		close(klog);
+		close(kfd);
 	}
 	mark_all();
 	flush();
@@ -843,8 +1225,12 @@ static int app(void)
 				touch = open_touch();
 		}
 		if (t - last_rx > 2500 && t - last_hello > 2000) {
-			send_line("HELLO littlelx-pi 1 %d %d", W, H);
+			send_line("HELLO littlelx-pi 2 %d %d %s", W, H, LLX_VERSION);
 			last_hello = t;
+		}
+		if (upd.active && t - upd.last_rx > 30000) {
+			klog("update timed out");
+			upd_close();
 		}
 		if (online && t - last_rx > 6000) {
 			set_online(0);

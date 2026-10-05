@@ -9,6 +9,8 @@ This script turns faders/keys/encoders into OSC for MA3 and draws the screen.
   littlelx.py --learn       teach it which pin is which control
   littlelx.py --calibrate   calibrate the touchscreen
   littlelx.py --monitor     print everything the Mega sends
+  littlelx.py --update-pi littlelx-pi-update.zip
+                            update the touchscreen's firmware over USB
   littlelx.py --port COM5   use a specific serial port
 
 Needs pyserial on Windows (pip install pyserial); on Mac/Linux it works with
@@ -25,6 +27,9 @@ import re
 import socket
 import struct
 import sys
+import base64
+import zipfile
+import zlib
 import threading
 import time
 
@@ -189,6 +194,7 @@ def stdin_reader():
 
 # ------------------------------------------------------------------ serial
 
+BAUD = 500000
 USB_IDS = {0x2341, 0x2A03, 0x1A86, 0x0403, 0x10C4}  # Arduino, CH340, FTDI, CP210x
 
 
@@ -215,17 +221,20 @@ class Port:
         self.path = path
         self.closed = False
         if serial:
-            self.s = serial.Serial(path, 115200, timeout=0.1)
+            self.s = serial.Serial(path, BAUD, timeout=0.1)
         else:  # stdlib fallback for Mac/Linux
             import termios
             self.fd = os.open(path, os.O_RDWR | os.O_NOCTTY)
             a = termios.tcgetattr(self.fd)
             a[0] = a[1] = a[3] = 0
             a[2] = termios.CS8 | termios.CREAD | termios.CLOCAL
-            a[4] = a[5] = termios.B115200
+            a[4] = a[5] = getattr(termios, "B%d" % BAUD, termios.B9600)
             a[6][termios.VMIN] = 0
             a[6][termios.VTIME] = 1
             termios.tcsetattr(self.fd, termios.TCSANOW, a)
+            if sys.platform == "darwin":  # macOS: non-standard rates need IOSSIOSPEED
+                import fcntl
+                fcntl.ioctl(self.fd, 0x80085402, struct.pack("L", BAUD))
         self.lock = threading.Lock()
         start_thread(self._reader)
 
@@ -699,7 +708,8 @@ class Bridge:
         if parts[0] == "HELLO":
             if len(parts) >= 5:
                 self.screen.w, self.screen.h = int(parts[3]), int(parts[4])
-            print(f"Touchscreen connected ({self.screen.w}x{self.screen.h})")
+            ver = parts[5] if len(parts) > 5 else "old"
+            print(f"Touchscreen connected ({self.screen.w}x{self.screen.h}, firmware {ver})")
             self.pi_ready = True
             cal = self.cfg.get("touch_cal")
             if cal:
@@ -956,12 +966,113 @@ def monitor(cfg):
             sys.exit("Controller disconnected.")
 
 
+def update_pi(cfg, path):
+    """Send a littlelx-pi-update.zip to the touchscreen over USB."""
+    try:
+        z = zipfile.ZipFile(path)
+    except (OSError, zipfile.BadZipFile) as e:
+        sys.exit(f"Can't open {path}: {e}")
+    inner = [n for n in z.namelist() if n.endswith(".zip")]
+    if len(z.namelist()) == 1 and inner:  # GitHub artifact download: zip in a zip
+        import io
+        z = zipfile.ZipFile(io.BytesIO(z.read(inner[0])))
+    names = [n for n in z.namelist() if not n.endswith("/")]
+    if "zImage" not in names or "littlelx.cpio.gz" not in names:
+        sys.exit(f"{path} doesn't look like a littlelx-pi-update.zip")
+    new_ver = z.read("VERSION").decode().strip() if "VERSION" in names else "?"
+    total = sum(z.getinfo(n).file_size for n in names)
+
+    ser = connect(cfg)
+
+    def wait(prefixes, timeout):
+        end = time.time() + timeout
+        while time.time() < end:
+            try:
+                kind, src, line = events.get(timeout=0.2)
+            except queue.Empty:
+                continue
+            if kind == "lost" and src is ser:
+                sys.exit("Controller disconnected during the update. The Pi still runs the old version; try again.")
+            if kind == "mega" and src is ser:
+                if line.startswith(">UPD FAIL"):
+                    ser.send(">UPD ABORT")
+                    sys.exit("Touchscreen reported an error: " + line[10:] + " (nothing was changed)")
+                for p in prefixes:
+                    if line.startswith(p):
+                        return line
+        return None
+
+    print("Looking for the touchscreen...")
+    hello = None
+    for _ in range(8):
+        ser.send(">?")
+        hello = wait([">HELLO"], 2)
+        if hello:
+            break
+    if not hello:
+        sys.exit("The touchscreen isn't answering. Is it powered and showing 'waiting for computer'?")
+    parts = hello.split()
+    old_ver = parts[5] if len(parts) > 5 else "old"
+    if len(parts) <= 5 or parts[2] == "1":
+        sys.exit("This touchscreen firmware is too old to update over USB; flash the SD card once instead.")
+    print(f"Touchscreen firmware {old_ver} -> {new_ver}")
+
+    ser.send(f">UPD BEGIN {total}")
+    r = wait([">UPD READY"], 20)
+    if not r:
+        sys.exit("No answer from the touchscreen (nothing was changed).")
+    sent = 0
+    shown = -1
+    CHUNK, WINDOW = 192, 4
+    for n in names:
+        data = z.read(n)
+        ser.send(f">UPD FILE {n} {len(data)} {zlib.crc32(data) & 0xffffffff:08x}")
+        r = wait([">UPD HAVE", ">UPD SEND"], 30)
+        if not r:
+            sys.exit("Touchscreen stopped answering (nothing was changed).")
+        if r.startswith(">UPD HAVE"):
+            sent += len(data)
+            continue
+        chunks = [data[i:i + CHUNK] for i in range(0, len(data), CHUNK)]
+        acked = 0
+        i = 0
+        while acked < len(chunks):
+            while i < len(chunks) and i - acked < WINDOW:
+                ser.send(">UPD DATA " + base64.b64encode(chunks[i]).decode())
+                i += 1
+            if not wait([">UPD ACK"], 15):
+                ser.send(">UPD ABORT")
+                sys.exit("Transfer stalled (nothing was changed). Try again.")
+            acked += 1
+            sent += len(chunks[acked - 1])
+            if sent * 100 // total != shown:
+                shown = sent * 100 // total
+                print(f"\r  {shown:3d}%  {n:<28}", end="", flush=True)
+        if not wait([">UPD OK"], 30):
+            sys.exit("\nFile wasn't confirmed (nothing was changed).")
+    print(f"\r  100%  {'all files sent':<28}")
+    ser.send(f">UPD COMMIT {len(names)}")
+    if not wait([">UPD DONE"], 60):
+        sys.exit("The touchscreen didn't confirm the switch. It will keep running the old version.")
+    print("Installed. The touchscreen is restarting...")
+    end = time.time() + 90
+    while time.time() < end:
+        ser.send(">?")
+        h = wait([">HELLO"], 3)
+        if h:
+            v = h.split()[5] if len(h.split()) > 5 else "?"
+            print(f"Touchscreen is back, running {v}.")
+            return
+    print("The touchscreen hasn't come back yet. If it stays blank, see 'Pi updates' in the README.")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--learn", action="store_true", help="learn the wiring")
     ap.add_argument("--calibrate", action="store_true", help="calibrate the touchscreen")
     ap.add_argument("--monitor", action="store_true", help="print raw events")
     ap.add_argument("--port", help="serial port (default: auto-detect)")
+    ap.add_argument("--update-pi", metavar="ZIP", help="update the touchscreen firmware")
     args = ap.parse_args()
     cfg = load_config()
     if args.port:
@@ -971,7 +1082,9 @@ def main():
     if os.name == "nt" and not serial:
         sys.exit("On Windows this needs pyserial:  py -m pip install pyserial")
     try:
-        if args.learn:
+        if args.update_pi:
+            update_pi(cfg, args.update_pi)
+        elif args.learn:
             learn(cfg)
         elif args.calibrate:
             calibrate(cfg)

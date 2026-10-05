@@ -20,6 +20,10 @@ jobs:
         with:
           name: littlelx-sdcard
           path: pi/out/littlelx-sdcard.img.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: littlelx-pi-update
+          path: pi/out/littlelx-pi-update.zip
 
   mega-firmware:
     runs-on: ubuntu-24.04
