@@ -760,6 +760,8 @@ class Screen:
         ma = b.ma_fader(i)
         pos = b.fader_pos[i]
         shown = ma if ma is not None else pos
+        if b.picked[i] and pos is not None and time.time() - b.moved_at[i] < b.HANDS_ON:
+            shown = pos  # in your hand: MA's echo lags, show the fader itself
         name = b.ma["name"].get(f["exec"]) if b.ma_linked() else None
         name = name or f.get("name") or (str(f["exec"]) if self.portrait else f"Exec {f['exec']}")
         if self.portrait:
@@ -853,6 +855,8 @@ def resource(*parts):
 
 
 class Bridge:
+    ECHO_WINDOW = 3.0   # s: MA's report of our own fader move can arrive this late
+    HANDS_ON = 1.5      # s after the last physical move the fader stays ours
     def __init__(self, cfg):
         self.cfg = cfg
         self.page = cfg.get("page", 1)
@@ -861,6 +865,8 @@ class Bridge:
         self.fader_pos = [None] * 5          # physical position 0..100
         self.fader_sent = [None] * 5
         self.picked = [True] * 5             # physical fader is in control (soft takeover)
+        self.sent_hist = [[] for _ in range(5)]  # (time, value) we sent recently: MA echoes these back late
+        self.moved_at = [0.0] * 5            # last physical movement
         self.fader_cmd_at = [0.0] * 5
         self.fader_cmd_pending = [None] * 5
         self.verbose = False
@@ -1010,6 +1016,11 @@ class Bridge:
             self.fader_cmd_at[i] = now
             self.fader_cmd_pending[i] = None
         self.fader_sent[i] = value
+        now = time.time()
+        hist = self.sent_hist[i]
+        hist.append((now, value))
+        while hist and now - hist[0][0] > self.ECHO_WINDOW:
+            hist.pop(0)
         addr, arg = fader_message(fmt, self.page, self.cfg["faders"][i]["exec"], value)
         self.osc(addr, arg)
         if self.verbose:
@@ -1055,6 +1066,8 @@ class Bridge:
     def on_fader(self, i, value):
         prev = self.fader_pos[i]
         self.fader_pos[i] = value
+        if prev is not None:
+            self.moved_at[i] = time.time()
         if prev is None:
             # First reading after connecting: only note where the fader is.
             # Sending it would yank MA's executor to wherever the knob sits.
@@ -1230,10 +1243,15 @@ class Bridge:
                 ma["fader"][ex] = v
                 for i, f in enumerate(self.cfg["faders"]):
                     if f["exec"] == ex:
-                        sent = self.fader_sent[i]
-                        # moved in MA by someone else: the physical fader must catch it
-                        if self.picked[i] and self.fader_pos[i] is not None and abs(v - self.fader_pos[i]) > 3 \
-                                and (sent is None or abs(v - sent) > 1.5):
+                        # Moved in MA by someone else? Then the physical fader must
+                        # catch it again. Not if it's just MA reporting one of our
+                        # own recent moves late, or the fader is in our hand now.
+                        now = time.time()
+                        ours = any(abs(v - sv) <= 1.5 for t, sv in self.sent_hist[i]
+                                   if now - t <= self.ECHO_WINDOW)
+                        hands_on = now - self.moved_at[i] < self.HANDS_ON
+                        if self.picked[i] and not ours and not hands_on and self.fader_pos[i] is not None \
+                                and abs(v - self.fader_pos[i]) > 3:
                             self.picked[i] = not self.cfg.get("pickup", True)
                         if scr:
                             scr.update_fader(i)
