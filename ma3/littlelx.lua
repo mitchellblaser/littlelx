@@ -285,18 +285,21 @@ end
 
 -- The channel function's DMX range: its start, and the next function's start
 -- on the same channel (or full) as its end.
-local function function_range(cf)
+local function function_range(cf, last_set)
+	-- last_set: where its last named value starts; the range can't end before
+	-- that (guards against a neighbour given in another resolution)
 	local from = dmx(prop(cf, "DMXFrom", "From")) or 0
+	local floor = math.max(from, last_set or from)
 	local to = dmx(prop(cf, "DMXTo", "To"))
-	if not to then
+	if not to or to <= floor then
 		to = 1
 		local ok, parent = pcall(function() return cf:Parent() end)
 		for _, f in ipairs(ok and parent and kids(parent) or {}) do
 			local x = dmx(prop(f, "DMXFrom", "From"))
-			if x and x > from + 1e-9 and x - 1 / 255 < to then to = x - 1 / 255 end
+			if x and x > floor + 1e-9 and x - 1 / 255 < to then to = x - 1 / 255 end
 		end
 	end
-	return from, math.max(to, from + 1e-9)
+	return from, math.max(to, floor, from + 1e-9)
 end
 
 -- Named values with the percent MA's "At" takes: where each one sits in its
@@ -305,7 +308,6 @@ local function channel_sets(sf, aname)
 	local out = {}
 	local cf = sf ~= nil and channel_function(sf, aname)
 	if not cf then return out end
-	local cfrom, cto = function_range(cf)
 	local raw = {}
 	for _, set in ipairs(kids(cf)) do
 		local nm = oname(set)
@@ -314,6 +316,11 @@ local function channel_sets(sf, aname)
 				pf = num(prop(set, "PhysicalFrom")), pt = num(prop(set, "PhysicalTo")) }
 		end
 	end
+	local last_set
+	for _, r in ipairs(raw) do
+		if r.f and (not last_set or r.f > last_set) then last_set = r.f end
+	end
+	local cfrom, cto = function_range(cf, last_set)
 	local cpf, cpt = num(prop(cf, "PhysicalFrom")), num(prop(cf, "PhysicalTo"))
 	local function pct(x, a, b) return math.max(0, math.min(100, (x - a) / (b - a) * 100)) end
 	for k, r in ipairs(raw) do
@@ -517,6 +524,15 @@ local function probe()
 			end
 			local cf = channel_function(sf, a.name)
 			say("  channel function found:", cf ~= nil and (cls(cf) .. " " .. tostring(oname(cf))) or "no")
+			if cf then
+				say("  function DMXFrom=", tostring(prop(cf, "DMXFrom", "From")), "DMXTo=", tostring(prop(cf, "DMXTo", "To")),
+					"PhysicalFrom=", tostring(prop(cf, "PhysicalFrom")), "PhysicalTo=", tostring(prop(cf, "PhysicalTo")))
+				local okp, parent = pcall(function() return cf:Parent() end)
+				for n, f in ipairs(okp and parent and kids(parent) or {}) do
+					if n > 8 then break end
+					say("  neighbour", cls(f), oname(f), "DMXFrom=", tostring(prop(f, "DMXFrom", "From")))
+				end
+			end
 			local found = {}
 			for _, set in ipairs(channel_sets(sf, a.name)) do found[#found + 1] = set.name .. "=" .. set.value end
 			say("  named values:", #found > 0 and table.concat(found, ", ") or "none")
