@@ -1185,7 +1185,7 @@ class Bridge:
         self.verbose = False
         self.ma = dict(alive=0.0, page=None, fader={}, run={}, name={}, master={}, cmdline="",
                        busy="", busy_at=0.0, res={}, color={},
-                       feat=("", "", False), encn=0, encs={})  # MA's encoders (see report_encoders)
+                       feat=("", "", False), encn=0, encs={}, ver=None, linked_at=0.0)  # MA's encoders (see report_encoders)
         self.enc_page = 0                    # which pair of MA's encoders the hardware ones follow
         self.enc_edge_at = [0.0, 0.0]        # encoder click-size auto-detection
         self.enc_checked = [0.0, 0.0]
@@ -1353,6 +1353,15 @@ class Bridge:
         if self.pi_ready:
             self.screen.update_cmdline()
 
+    def ma_code_version(self):
+        """Short fingerprint of the MA code this bridge would install."""
+        if not hasattr(self, "_ma_ver"):
+            try:
+                self._ma_ver = f"{zlib.crc32(open(resource('ma3', 'littlelx.lua'), 'rb').read()):08x}"
+            except OSError:
+                self._ma_ver = ""
+        return self._ma_ver
+
     def install_ma3(self):
         """Put the littlelx code into MA3 over OSC and start it (no import needed)."""
         try:
@@ -1371,7 +1380,7 @@ class Bridge:
                                    if e and isinstance(e.get("push"), dict) and "resolution" in e["push"]}
                                 | set(self.cfg.get("encoder_attributes", [])))) or "Dimmer"
         attrs = re.sub(r"[^A-Za-z0-9,_]", "", attrs)
-        start = 'Lua "' + self.MA_RUN.replace("{arg}", f"__start {line} {tick} {attrs}") + '"'
+        start = 'Lua "' + self.MA_RUN.replace("{arg}", f"__start {line} {tick} {attrs} {self.ma_code_version()}") + '"'
 
         def send_all():  # spaced out for MA, on its own thread so faders never wait
             for i, piece in enumerate(pieces, 1):
@@ -1636,10 +1645,19 @@ class Bridge:
         nums = [a for a in args if isinstance(a, (int, float)) and not isinstance(a, bool)]
         if nums:
             self.ma_values[(page, ex)] = float(nums[-1])
-        if page == self.page and self.pi_ready:
+        if page == self.page:
             for i, f in enumerate(self.cfg["faders"]):
                 if f["exec"] == ex:
-                    self.screen.update_fader(i)
+                    self.check_pickup(i)
+                    if self.pi_ready:
+                        self.screen.update_fader(i)
+
+    def check_pickup(self, i):
+        """A fader already sitting at MA's level (e.g. 0 % on both after a page
+        change) has nothing to catch: it is in control straight away."""
+        ma, pos = self.ma_fader(i), self.fader_pos[i]
+        if not self.picked[i] and ma is not None and pos is not None and abs(pos - ma) <= 2:
+            self.picked[i] = True
 
     def on_littlelx(self, what, args):
         """State reported by the code running inside MA3."""
@@ -1649,6 +1667,7 @@ class Bridge:
         ma["alive"] = time.time()
         if not was_linked:
             print("MA3 linked: page, faders, key states and command line follow MA.")
+            ma["ver"], ma["linked_at"] = None, time.time()
         scr = self.screen if self.pi_ready else None
         if what == "page" and isinstance(val, int):
             self.set_page(val, from_ma=True)
@@ -1670,6 +1689,7 @@ class Bridge:
                         if self.picked[i] and not ours and not hands_on and self.fader_pos[i] is not None \
                                 and abs(v - self.fader_pos[i]) > 3:
                             self.picked[i] = not self.cfg.get("pickup", True)
+                        self.check_pickup(i)
                         if scr:
                             scr.update_fader(i)
             elif kind == "run":
@@ -1714,6 +1734,8 @@ class Bridge:
             ma["encs"][int(what[4:])] = dict(attr=p[0], pretty=p[1] or p[0], value=p[2], prog=p[3] == "p", res=res)
             if scr:
                 scr.update_encoders()
+        elif what == "ver":
+            ma["ver"] = str(val or "")
         elif what == "probe":
             print("MA probe:\n  " + str(val or "").replace(" / ", "\n  "))
         elif what.startswith("res/"):
@@ -1789,9 +1811,13 @@ class Bridge:
                 now = time.time()
                 self.flush_faders()
                 self.check_encoder_clicks(now)
-                if (self.cfg.get("ma3", {}).get("auto_install", True) and not self.ma_linked()
-                        and now - started > 4 and now - self.ma_installed_at > 30):
-                    self.install_ma3()
+                if self.cfg.get("ma3", {}).get("auto_install", True) and now - self.ma_installed_at > 30:
+                    if not self.ma_linked() and now - started > 4:
+                        self.install_ma3()
+                    elif (self.ma_linked() and self.ma["ver"] != self.ma_code_version()
+                          and now - self.ma["linked_at"] > 5):  # older code still running in MA
+                        print("Updating the littlelx code in MA3...")
+                        self.install_ma3()
                 if self.ma["busy"] and now - self.ma["busy_at"] > 3:
                     self.ma["busy"] = ""
                     if self.pi_ready:

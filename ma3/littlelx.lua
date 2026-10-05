@@ -16,8 +16,9 @@
 --   "page 3"       select executor page 3
 --   "res Dimmer"   toggle MA's encoder resolution for an attribute (Coarse/Fine)
 --   "probe"        print what this MA version's Lua offers (encoder diagnostics)
---   "__start <osc line> <tick> [Attr,Attr]"   start reporting from a Timer
---                  (bridge install); also report those attributes' resolution
+--   "__start <osc line> <tick> [Attr,Attr] [version]"   start reporting from a
+--                  Timer (bridge install); also report those attributes'
+--                  resolution, and the version so the bridge can update us
 --
 -- MA needs an OSC line that SENDS to the bridge computer (its IP, port 9000,
 -- Send = Yes). Its number is passed by the bridge; 2 if run as a plugin.
@@ -33,6 +34,7 @@ local RUNVAR = "littlelx_running"
 local GENVAR = "littlelx_gen"       -- bumps on every (re)start; old timers stop
 
 local last = {}
+local VERSION = ""                  -- set by the bridge at start: it reinstalls when this differs
 
 -- MA3's tonumber only accepts strings: never hand it a number.
 local function num(v)
@@ -277,6 +279,22 @@ local function probe()
 	else
 		say("attribute definitions:", okA, tostring(attrs))
 	end
+	local okP, execs = pcall(function() return DataPool().Pages[CurrentExecPage().index]:Children() end)
+	for _, ex in ipairs(okP and execs or {}) do
+		local obj = prop(ex, "Object")
+		if obj then
+			say("executor", ex.No, "object:", oname(obj), "colour we read:", seq_color(obj))
+			local ap = prop(obj, "Appearance", "appearance")
+			say("  Appearance:", type(ap), tostring(ap), oname(ap))
+			if ap and type(ap) ~= "string" then
+				for _, k in ipairs({ "BackR", "BackG", "BackB", "BackAlpha", "Color", "BackColor", "ImageR", "ImageG", "ImageB" }) do
+					say("  Appearance." .. k, "=", tostring(prop(ap, k)))
+				end
+			end
+			say("  object Color =", tostring(prop(obj, "Color", "color")))
+			break
+		end
+	end
 	local sf = try(SelectionFirst)
 	say("selection first:", sf)
 	if sf ~= nil then
@@ -418,13 +436,15 @@ local function tick()
 	if beat >= 2 then
 		beat = 0
 		send("alive", "i", 1)
+		send("ver", "s", VERSION)
 	end
 end
 
 -- Bridge install: no plugin object, so run from MA's Timer. The Timer API
 -- documents a whole-second delay; try our tick first, fall back to 1 s.
-local function start_timer(line, tick_s, attrs)
+local function start_timer(line, tick_s, attrs, ver)
 	OSC_LINE = num(line) or OSC_LINE
+	VERSION = ver or ""
 	TICK = num(tick_s) or TICK
 	if attrs and attrs ~= "" then
 		ATTRS = {}
@@ -439,6 +459,7 @@ local function start_timer(line, tick_s, attrs)
 	end
 	report(true)
 	send("alive", "i", 1)
+	send("ver", "s", VERSION)
 	if not pcall(Timer, step, TICK, 1000000000) then
 		TICK = 1
 		Timer(step, 1, 1000000000)
@@ -448,9 +469,9 @@ end
 
 local function main(display, arg)
 	if arg and arg ~= "" then
-		local line, tick_s, attrs = arg:match("^__start%s+(%S+)%s*(%S*)%s*(%S*)")
+		local line, tick_s, attrs, ver = arg:match("^__start%s+(%S+)%s*(%S*)%s*(%S*)%s*(%S*)")
 		if line then
-			start_timer(line, tick_s, attrs)
+			start_timer(line, tick_s, attrs, ver)
 		else
 			act(arg)
 		end
