@@ -95,10 +95,19 @@ Get `littlelx-sdcard.img.gz` (from the GitHub Actions run, *build → Artifacts*
 or build it yourself, see below). Write it with Raspberry Pi Imager (*Use
 custom*) or balenaEtcher. Any card size works; only 32 MB is used.
 
-The default screen setting is for the Waveshare 3.5" (A) and its clones
-(ILI9486 + XPT2046, `piscreen` overlay), mounted **portrait**. If the picture is
-upside down, change `rotate=0` to `rotate=180` in `config.txt`. For landscape,
-use 90/270; the bridge's layout adapts by itself. If it's garbled, lower `speed`.
+The default screen setting (`dtoverlay=littlelx35`) is for the common 3.5"
+XPT2046 boards that goodtft's **LCD-show** (`LCD35-show`, `tft35a`) supports,
+mounted **portrait**. It uses exactly the same display setup as LCD-show.
+Genuine Waveshare 3.5" (A) boards need `piscreen` instead; both lines are in
+`config.txt`, just move the `#`. If the picture is upside down, use
+`rotate=180`. For landscape use 90/270; the bridge's layout adapts by itself.
+
+**Screen stays white?** Look at the Pi's green LED:
+* **Double-blinking heartbeat:** Linux is running, so it's the display setting.
+  Try the other `dtoverlay=` line. The bridge also prints
+  `Touchscreen status: fb=missing` in this case.
+* **No blinking:** the Pi isn't booting. Remove the overclock lines from
+  `config.txt` and check the power supply.
 
 ### 4. Get the bridge running
 
