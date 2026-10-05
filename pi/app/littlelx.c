@@ -498,6 +498,10 @@ static void set_online(int on)
  *   UPD FILE <path> <size> <crc>  -> UPD HAVE <path> (copied from the running
  *                                    slot, identical) or UPD SEND <path>
  *   UPD DATA <base64>             -> UPD ACK <bytes so far>, then UPD OK <path>
+ *   UPD DAT <offset> <base64>     same, but self-repairing: a chunk that isn't
+ *                                 at <offset> == bytes so far, or doesn't
+ *                                 decode, is ignored and answered with
+ *                                 UPD ACK <bytes so far> so the bridge resends
  *   UPD COMMIT <files>            switch slots, reboot         -> UPD DONE
  *   UPD ABORT                     give up, nothing changes     -> UPD ABORTED
  *   errors: UPD FAIL <reason>
@@ -756,16 +760,26 @@ static void upd_file(const char *rel, long size, uint32_t want)
 		upd_finish_file();
 }
 
-static void upd_data(const char *b64)
+/* offset < 0: old-style DATA, any damage fails the update.
+ * offset >= 0: DAT, out-of-place or damaged chunks just ask for a resend. */
+static void upd_data(const char *b64, long offset)
 {
 	uint8_t buf[256];
 	if (!upd.active || upd.fd < 0) {
-		upd_fail("unexpected-DATA");
+		if (offset < 0)
+			upd_fail("unexpected-DATA");
+		return; /* a resent chunk after the file completed: harmless */
+	}
+	if (offset >= 0 && offset != upd.got) {
+		send_line("UPD ACK %ld", upd.got);
 		return;
 	}
 	int n = strlen(b64) <= 340 ? b64_decode(b64, buf) : -1;
 	if (n < 0 || upd.got + n > upd.size) {
-		upd_fail("bad-data");
+		if (offset >= 0)
+			send_line("UPD ACK %ld", upd.got);
+		else
+			upd_fail("bad-data");
 		return;
 	}
 	if (write(upd.fd, buf, n) != n) {
@@ -825,7 +839,13 @@ static void upd_line(char *args)
 		(void)rest;
 		upd_file(f[0], atol(f[1]), (uint32_t)strtoul(f[2], NULL, 16));
 	} else if (!strncmp(args, "DATA ", 5)) {
-		upd_data(args + 5);
+		upd_data(args + 5, -1);
+	} else if (!strncmp(args, "DAT ", 4)) {
+		char *sp;
+		long off = strtol(args + 4, &sp, 10);
+		if (*sp == ' ')
+			sp++;
+		upd_data(sp, off < 0 ? 0 : off);
 	} else if (!strncmp(args, "COMMIT", 6)) {
 		upd_commit(atoi(args + 6));
 	} else if (!strncmp(args, "ABORT", 5)) {
