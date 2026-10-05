@@ -259,15 +259,61 @@ local function channel_function(sf, aname)
 	return nil
 end
 
+-- A DMX value as a fraction of full. MA gives "128/1" (value / bytes) or a number.
+local function dmx(v)
+	if type(v) == "number" then return v <= 255 and v / 255 or v / 65535 end
+	if type(v) ~= "string" then return nil end
+	local a, r = v:match("^%s*(%d+)%s*/%s*(%d+)")
+	if a then return tonumber(a) / (256 ^ tonumber(r) - 1) end
+	local n = tonumber(v)
+	if n then return n <= 255 and n / 255 or n / 65535 end
+	return nil
+end
+
+-- The channel function's DMX range: its start, and the next function's start
+-- on the same channel (or full) as its end.
+local function function_range(cf)
+	local from = dmx(prop(cf, "DMXFrom", "From")) or 0
+	local to = dmx(prop(cf, "DMXTo", "To"))
+	if not to then
+		to = 1
+		local ok, parent = pcall(function() return cf:Parent() end)
+		for _, f in ipairs(ok and parent and kids(parent) or {}) do
+			local x = dmx(prop(f, "DMXFrom", "From"))
+			if x and x > from + 1e-9 and x - 1 / 255 < to then to = x - 1 / 255 end
+		end
+	end
+	return from, math.max(to, from + 1e-9)
+end
+
+-- Named values with the percent MA's "At" takes: where each one sits in its
+-- channel function's DMX range (MA's physical units vary: Dimmer is 0..1).
 local function channel_sets(sf, aname)
 	local out = {}
 	local cf = sf ~= nil and channel_function(sf, aname)
-	for _, set in ipairs(cf and kids(cf) or {}) do
+	if not cf then return out end
+	local cfrom, cto = function_range(cf)
+	local raw = {}
+	for _, set in ipairs(kids(cf)) do
 		local nm = oname(set)
-		local pf, pt = num(prop(set, "PhysicalFrom")), num(prop(set, "PhysicalTo"))
-		if nm and nm ~= "" and pf then
-			out[#out + 1] = { name = nm, value = pt and (pf + pt) / 2 or pf, from = math.min(pf, pt or pf),
-				to = math.max(pf, pt or pf) }
+		if nm and nm ~= "" then
+			raw[#raw + 1] = { name = nm, f = dmx(prop(set, "DMXFrom", "From")), t = dmx(prop(set, "DMXTo", "To")),
+				pf = num(prop(set, "PhysicalFrom")), pt = num(prop(set, "PhysicalTo")) }
+		end
+	end
+	local cpf, cpt = num(prop(cf, "PhysicalFrom")), num(prop(cf, "PhysicalTo"))
+	local function pct(x, a, b) return math.max(0, math.min(100, (x - a) / (b - a) * 100)) end
+	for k, r in ipairs(raw) do
+		local lo, hi
+		if r.f then
+			local t = r.t or (raw[k + 1] and raw[k + 1].f and raw[k + 1].f - 1 / 255) or cto
+			lo, hi = pct(r.f, cfrom, cto), pct(math.max(t, r.f), cfrom, cto)
+		elseif r.pf and cpf and cpt and cpt ~= cpf then -- no DMX: place it by physical value
+			lo, hi = pct(r.pf, cpf, cpt), pct(r.pt or r.pf, cpf, cpt)
+			if lo > hi then lo, hi = hi, lo end
+		end
+		if lo then
+			out[#out + 1] = { name = r.name, value = (lo + hi) / 2, from = lo, to = hi }
 		end
 	end
 	return out
@@ -286,7 +332,7 @@ local function value_words(sf, aname, v)
 		sets_cache[key] = sets
 	end
 	for _, set in ipairs(sets) do
-		if x >= set.from - 1e-6 and x <= set.to + 1e-6 then return set.name end
+		if x >= set.from - 0.25 and x <= set.to + 0.25 then return set.name end
 	end
 	return v
 end
@@ -306,7 +352,7 @@ local function apply_set(aname, n)
 		send("busy", "s", "that value isn't on the selected fixture")
 		return
 	end
-	local v = string.format("%.4f", set.value):gsub("0+$", ""):gsub("%.$", "")
+	local v = string.format("%.2f", set.value):gsub("0+$", ""):gsub("%.$", "")
 	Cmd(string.format('Attribute "%s" At %s', aname, v))
 	Printf(string.format("littlelx: %s %s -> At %s", aname, set.name, v))
 end

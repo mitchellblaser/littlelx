@@ -256,9 +256,9 @@ a `{"cmd": ...}` using `{d}` for the step.
 selected fixture, two at a time (the **1/2** button on the Encoders page swaps
 pairs). The page shows each attribute's value in MA's colours (red = in the
 programmer) and its Coarse/Fine (tap to toggle). **Click an encoder** (or tap its
-value) to set its attribute: a number pad (then Set), or, for attributes with
-named values (gobos, colour slots...), a list of them read from the selected
-fixture's type: tap one to use it, turn the encoder to scroll. Values inside a
+value) to set its attribute: a number pad (then Set) and, for attributes with
+named values (gobos, colour slots...), above it a list of them read from the
+selected fixture's type: tap one to use it, turn the encoder to scroll. Values inside a
 named range show as its name, like MA's encoder bar. With
 nothing selected in MA they fall back to what's set in the config (Dimmer and
 Page). If the page stays on

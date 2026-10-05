@@ -1023,8 +1023,6 @@ class Screen:
         if not a:
             return "-"
         now = f"   (now {a[2]})" if a[2] else ""
-        if self.b.ma["sets"].get(a[0].lower()):
-            return f"{a[1]}{now}\nchoose one"
         return f"{a[1]}{now}\n{self.value_entry or ''}_"
 
     def show_sets(self, i):
@@ -1082,10 +1080,9 @@ class Screen:
         self.widget(self.SET_TITLE, "L", 4, top, w - 8, 56, "000000", C_CMD, "000000", 1, 0, 0, self.value_title(i))
         y = top + 60
         sets = b.ma["sets"].get(a[0].lower(), []) if a else []
-        if sets:  # named values instead of the number pad
-            sh = 48
-            fit = (self.h - 62 - 34 - y) // sh
-            rows = min(fit, -(-len(sets) // 3))
+        if sets:  # named values above the number pad
+            sh = 40
+            rows = min(3, -(-len(sets) // 3))
             self.sets_rows = rows
             sw = (w - 4) // 3
             for n in range(rows * 3):
@@ -1096,9 +1093,8 @@ class Screen:
             if len(sets) > rows * 3:  # more than fit: the encoder (or this button) scrolls
                 self.keymap[self.SET_MORE] = {"setpage": 1, "enc": i}
                 self.widget(self.SET_MORE, "B", 4, y, w - 8, 30, C_PANEL, C_DIM, C_BTN_ON, 0, 0, 0, "")
+                y += 34
             self.show_sets(i)
-            self.back_button()
-            return
         bw, bh = (w - 4) // 3, (self.h - 4 - y) // 5
         keys = ["7", "8", "9", "4", "5", "6", "1", "2", "3", ".", "0", "<-"]
         for n, k in enumerate(keys):
