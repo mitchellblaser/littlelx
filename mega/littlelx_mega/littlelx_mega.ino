@@ -4,13 +4,14 @@
  * The Mega is the only thing plugged into the computer. It:
  *   - reports every input pin change and analog value over USB, so the wiring
  *     does not need to be known in advance (the computer "learns" it),
- *   - relays the Raspberry Pi touchscreen, which hangs off one of the Mega's
- *     hardware serial ports (auto-detected: Serial1, Serial2 or Serial3).
+ *   - relays the Raspberry Pi touchscreen on Serial3:
+ *       Mega TX3 (pin 14) -> divider (1k + 2k) -> Pi GPIO15 / RXD (header pin 10)
+ *       Mega RX3 (pin 15) <- Pi GPIO14 / TXD (header pin 8), plus GND.
  *
  * USB protocol (500000 baud, text lines):
  *   Mega -> computer
  *     HELLO littlelx-mega 1
- *     PI <n>              Pi found on Serial<n> (0 = not found yet)
+ *     PI 3                touchscreen port (Serial3)
  *     D<pin> <0|1>        digital pin changed (pullups: 0 = pressed)
  *     A<ch> <0..1023>     analog input A<ch> changed
  *     ><text>             line from the Pi
@@ -22,17 +23,16 @@
  *                         so lines of any length and full-speed updates work)
  *
  * Defaults: D2-D53 = input+pullup (debounced), A0-A15 = analog.
- * Pins 0/1 (USB) and 14-19 (serial ports) are left alone until the Pi is found;
- * after that the two unused serial ports' pins are scanned as normal inputs.
+ * Pins 0/1 (USB) and 14/15 (Pi) are not scanned; everything else is.
  */
-#include <EEPROM.h>
 
 #define NPINS 70
 #define DEBOUNCE_MS 4
 #define ANALOG_STEP 4
 #define PI_BAUD 500000
-#define EE_MAGIC 0x4c
-#define EE_ADDR 0
+#define PISER Serial3
+#define PI_TX 14
+#define PI_RX 15
 
 enum { M_OFF = 0, M_INPUT = 1, M_PULLUP = 2, M_ANALOG = 3, M_RAW = 8 };
 
@@ -47,36 +47,16 @@ static uint16_t aval[16];         /* filtered x16 */
 static int16_t asent[16];
 static uint8_t ach = 0, adc_pass = 0, adc_busy = 0;
 
-static HardwareSerial *ports[4] = { 0, &Serial1, &Serial2, &Serial3 };
-static const uint8_t port_pins[4][2] = { { 0, 1 }, { 19, 18 }, { 17, 16 }, { 15, 14 } }; /* rx, tx */
-static uint8_t pi_port = 0;
 
 static char usb_buf[160];
 static uint8_t usb_len;
 static bool usb_to_pi;   /* inside a ">..." line: pass bytes straight through */
-static char pi_buf[4][160];
-static uint8_t pi_len[4];
+static char pi_buf[160];
+static uint8_t pi_len;
 
 static bool pin_reserved(uint8_t p)
 {
-	if (p <= 1)
-		return true;
-	if (p >= 14 && p <= 19) {
-		if (!pi_port)
-			return true;
-		return p == port_pins[pi_port][0] || p == port_pins[pi_port][1];
-	}
-	return false;
-}
-
-static void tx_enable(uint8_t n, bool on)
-{
-	volatile uint8_t *ucsrb = n == 1 ? &UCSR1B : n == 2 ? &UCSR2B : &UCSR3B;
-	uint8_t bit = n == 1 ? TXEN1 : n == 2 ? TXEN2 : TXEN3;
-	if (on)
-		*ucsrb |= _BV(bit);
-	else
-		*ucsrb &= ~_BV(bit);
+	return p <= 1 || p == PI_TX || p == PI_RX;
 }
 
 static void apply_mode(uint8_t p)
@@ -115,8 +95,7 @@ static void report_analog(uint8_t ch)
 static void dump_all()
 {
 	Serial.println(F("HELLO littlelx-mega 1"));
-	Serial.print(F("PI "));
-	Serial.println(pi_port);
+	Serial.println(F("PI 3"));
 	for (uint8_t p = 0; p < NPINS; p++) {
 		uint8_t m = mode[p] & 7;
 		if (pin_reserved(p) || m == M_OFF)
@@ -126,25 +105,6 @@ static void dump_all()
 		else
 			report_digital(p);
 	}
-}
-
-static void lock_pi(uint8_t n)
-{
-	if (pi_port == n)
-		return;
-	if (pi_port)
-		tx_enable(pi_port, false);
-	pi_port = n;
-	tx_enable(n, true);
-	/* the other two ports' pins become ordinary inputs */
-	for (uint8_t p = 14; p <= 19; p++)
-		apply_mode(p);
-	if (EEPROM.read(EE_ADDR) != EE_MAGIC || EEPROM.read(EE_ADDR + 1) != n) {
-		EEPROM.write(EE_ADDR, EE_MAGIC);
-		EEPROM.write(EE_ADDR + 1, n);
-	}
-	Serial.print(F("PI "));
-	Serial.println(n);
 }
 
 static void usb_line(char *s)
@@ -166,14 +126,8 @@ static void usb_line(char *s)
 	}
 }
 
-static void pi_line(uint8_t n, char *s)
+static void pi_line(char *s)
 {
-	if (n != pi_port) {
-		/* only lock onto a port that really speaks our protocol */
-		if (strncmp(s, "HELLO littlelx-pi", 17))
-			return;
-		lock_pi(n);
-	}
 	Serial.print('>');
 	Serial.println(s);
 }
@@ -183,8 +137,7 @@ static void poll_serial()
 	while (Serial.available()) {
 		char c = Serial.read();
 		if (usb_to_pi) {
-			if (pi_port)
-				ports[pi_port]->write(c);
+			PISER.write(c);
 			if (c == '\n')
 				usb_to_pi = false;
 			continue;
@@ -204,22 +157,19 @@ static void poll_serial()
 			usb_buf[usb_len++] = c;
 		}
 	}
-	for (uint8_t n = 1; n <= 3; n++) {
-		HardwareSerial *s = ports[n];
-		while (s->available()) {
-			char c = s->read();
-			if (c == '\r')
-				continue;
-			if (c == '\n') {
-				pi_buf[n][pi_len[n]] = 0;
-				if (pi_len[n])
-					pi_line(n, pi_buf[n]);
-				pi_len[n] = 0;
-			} else if ((uint8_t)c >= 32 && pi_len[n] < sizeof(pi_buf[n]) - 1) {
-				pi_buf[n][pi_len[n]++] = c;
-			} else if ((uint8_t)c >= 128) {
-				pi_len[n] = 0; /* garbage: floating pin or wrong baud */
-			}
+	while (PISER.available()) {
+		char c = PISER.read();
+		if (c == '\r')
+			continue;
+		if (c == '\n') {
+			pi_buf[pi_len] = 0;
+			if (pi_len)
+				pi_line(pi_buf);
+			pi_len = 0;
+		} else if ((uint8_t)c >= 32 && pi_len < sizeof(pi_buf) - 1) {
+			pi_buf[pi_len++] = c;
+		} else if ((uint8_t)c >= 128) {
+			pi_len = 0; /* garbage: Pi booting / unplugged */
 		}
 	}
 }
@@ -299,10 +249,7 @@ static void scan_analog()
 void setup()
 {
 	Serial.begin(500000);
-	for (uint8_t n = 1; n <= 3; n++) {
-		ports[n]->begin(PI_BAUD);
-		tx_enable(n, false); /* listen only until we know where the Pi is */
-	}
+	PISER.begin(PI_BAUD);
 	for (uint8_t p = 0; p < NPINS; p++) {
 		pinreg[p] = portInputRegister(digitalPinToPort(p));
 		pinmask[p] = digitalPinToBitMask(p);
@@ -313,20 +260,9 @@ void setup()
 		aval[i] = 0;
 		asent[i] = -100;
 	}
-	if (EEPROM.read(EE_ADDR) == EE_MAGIC) {
-		uint8_t n = EEPROM.read(EE_ADDR + 1);
-		if (n >= 1 && n <= 3) {
-			pi_port = n;
-			tx_enable(n, true);
-			for (uint8_t p = 14; p <= 19; p++)
-				apply_mode(p);
-		}
-	}
 	Serial.println(F("HELLO littlelx-mega 1"));
-	Serial.print(F("PI "));
-	Serial.println(pi_port);
-	if (pi_port)
-		ports[pi_port]->print("?\n");
+	Serial.println(F("PI 3"));
+	PISER.print("?\n"); /* ask the touchscreen to say hello */
 }
 
 void loop()

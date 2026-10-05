@@ -57,14 +57,29 @@ the wiring learner, so it isn't the default.
 
 ### 1. Wiring check
 
-* Mega `TXn` → Pi **GPIO15 (pin 10)**, Mega `RXn` ← Pi **GPIO14 (pin 8)**, plus GND.
-  Any of Serial1 (18/19), Serial2 (16/17) or Serial3 (14/15) works; the
-  firmware finds it automatically.
-* ⚠️ The Mega's TX is **5 V**, but the Pi's RX is **3.3 V only**. There must be a
-  divider or level shifter on Mega TX → Pi RX (e.g. 1 kΩ in series and 2 kΩ to GND).
-  Without one, you will eventually kill GPIO15.
+The Pi talks to the Mega's **Serial3**:
+
+```
+Mega TX3 (pin 14) ──[ 1kΩ ]──┬──► Pi GPIO15 / RXD (header pin 10)
+                             │
+                           [ 2kΩ ]   (2.2kΩ is fine too)
+                             │
+Mega GND ────────────────────┴────── Pi GND (e.g. header pin 6)
+
+Mega RX3 (pin 15) ◄──────────────── Pi GPIO14 / TXD (header pin 8)   (direct wire is fine)
+```
+
+* ⚠️ **The two resistors are not optional.** The Mega's TX is **5 V** and the
+  Pi's pins are **3.3 V only**. Wired straight, the Mega slowly damages GPIO15
+  (or the whole Pi), and it back-powers the Pi through that pin when the Pi is
+  off. The divider brings it down to ~3.3 V. A BSS138-style level-shifter board
+  also works. The other direction (Pi → Mega) needs nothing.
+* Already ran it without resistors? If the screen gets stuck on "waiting for
+  computer…" while the bridge says the Mega is connected, the Pi's RX pin is
+  probably damaged.
 * Keys/encoders: switch to GND (the Mega uses internal pull-ups). Faders: wipers
-  on A0–A15. Nothing else needs to be known. Step 4 learns which pin is which.
+  on A0–A15. Any pin except 0, 1, 14 and 15 can be used. Nothing else needs to be
+  known; the learn step works out which pin is which.
 
 ### 2. Flash the Mega
 
