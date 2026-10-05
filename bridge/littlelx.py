@@ -72,7 +72,7 @@ def bridge_version():
 #   {"cmd": "... {d} ..."}               {d} = step per click, or {"page": 1}
 # Push actions also allow {"resolution": "Dimmer"}: toggle MA's Coarse/Fine.
 
-CONFIG_VERSION = 6
+CONFIG_VERSION = 7
 
 DEFAULTS = {
     "config_version": CONFIG_VERSION,
@@ -95,10 +95,11 @@ DEFAULTS = {
     "page": 1,
     "pickup": True,               # soft takeover: a fader acts once it reaches MA's level
     "faders": [{"exec": 201 + i, "name": ""} for i in range(5)],
-    "keys": (
-        [{"exec": 201 + i} for i in range(5)]          # under the faders
-        + [{"exec": 101 + i} for i in range(10)]       # button executors
-        + [{"page": -1}, {"page": 1}, {"key": "Clear"}, {"cmd": "Go+"}, {"cmd": "Oops"}]
+    "keys": (  # also set from the touchscreen: Setup
+        [{"page": -1}, {"page": 1}, {"key": "Clear"}, {"cmd": "Oops"}, {"key": "Please"}]
+        + [{"exec": 301 + i} for i in range(5)]
+        + [{"exec": 201 + i} for i in range(5)]
+        + [{"exec": 101 + i} for i in range(5)]
     ),
     "encoders": [
         # "follow": turn MA's encoders (the selected feature's attributes, a pair
@@ -171,6 +172,12 @@ def migrate(cfg):
     if cfg.get("config_version", 1) < 2:
         cfg.pop("sync_page_to_ma", None)
         cfg["pickup"] = True  # old default was off; soft takeover is now on
+    old_keys = ([{"exec": 201 + i} for i in range(5)] + [{"exec": 101 + i} for i in range(10)]
+                + [{"page": -1}, {"page": 1}, {"key": "Clear"}, {"cmd": "Go+"}, {"cmd": "Oops"}])
+    if cfg.get("keys") == old_keys:  # v7: the old default layout -> the new one
+        cfg["keys"] = copy.deepcopy(DEFAULTS["keys"])
+        print("Keys updated: 1-5 Page -, Page +, Clear, Oops, Please; 6-10 exec 301-305;"
+              " 11-15 exec 201-205; 16-20 exec 101-105 (change them on the touchscreen: Setup).")
     if cfg.get("config_version", 1) < 6:  # encoders follow MA's encoders
         for e in cfg.get("encoders", []):
             if e is not None:
@@ -690,7 +697,7 @@ class Screen:
     Every widget's current state is kept here, so the whole screen can be
     re-sent bit by bit in the background: anything lost on the serial link
     reappears within a few seconds."""
-    HDR_PAGE, HDR_MID, HDR_STATUS = 0, 1, 2
+    HDR_PAGE, HDR_MID, HDR_STATUS, HDR_SETUP = 0, 1, 2, 3
     FADER0 = 10
     BTN0 = 20
     CMDLINE = 39
@@ -700,6 +707,8 @@ class Screen:
     PICK_TITLE = 89
     PICK0 = 90     # attribute choices
     BACK = 120
+    SET_TITLE, SET_RESET = 121, 122
+    SET0 = 125     # setup grids (keys, functions, digits)
 
     KEYPAD = [
         ["Fixture", "7", "8", "9", "Thru"],
@@ -714,6 +723,9 @@ class Screen:
         self.name = "main"
         self.dirty_faders = set()
         self.enc_mode = False  # encoders page drawn for MA's encoders (else the set ones)
+        self.keymap_hdr = {}
+        self.exec_entry = ""
+        self.reset_armed = 0.0
         self.cmdline = ""      # local command line (used when MA isn't linked)
         self.keymap = {}
         self.w, self.h = 320, 480
@@ -793,13 +805,17 @@ class Screen:
         w = self.w
         page = f"Page {self.b.page}"
         if self.portrait:
-            self.widget(self.HDR_PAGE, "L", 0, 0, w // 2, 30, C_PANEL, C_TEXT, C_PANEL, 1, 1, 0, page)
+            self.widget(self.HDR_PAGE, "L", 0, 0, 100, 30, C_PANEL, C_TEXT, C_PANEL, 1, 1, 0, page)
             self.widget(self.HDR_MID, "L", 0, 30, w, 24, C_PANEL, C_CMD, C_PANEL, 0, 1, 0, self.mid_text())
+            x = 100
         else:
             self.widget(self.HDR_PAGE, "L", 0, 0, 120, 30, C_PANEL, C_TEXT, C_PANEL, 1, 1, 0, page)
-            self.widget(self.HDR_MID, "L", 120, 0, w - 260, 30, C_PANEL, C_CMD, C_PANEL, 0, 0, 0, self.mid_text())
-        x = self.w // 2 if self.portrait else self.w - 140
-        self.widget(self.HDR_STATUS, "L", x, 0, self.w - x, 30, C_PANEL, C_DIM, C_PANEL, 0, 2, 0, "")
+            self.widget(self.HDR_MID, "L", 120, 0, w - 340, 30, C_PANEL, C_CMD, C_PANEL, 0, 0, 0, self.mid_text())
+            x = w - 220
+        self.widget(self.HDR_STATUS, "L", x, 0, w - 80 - x, 30, C_PANEL, C_DIM, C_PANEL, 0, 2, 0, "")
+        self.keymap_hdr = {self.HDR_SETUP: {"setup": True}}
+        self.widget(self.HDR_SETUP, "B", w - 76, 2, 72, 26, C_KEY2, C_TEXT, C_BTN_ON, 0, 0,
+                    1 if self.in_setup() else 0, "Setup")
         self.update_header()
 
     def update_header(self):
@@ -826,6 +842,12 @@ class Screen:
             self.draw_encoders()
         elif self.name.startswith("pick"):
             self.draw_picker(int(self.name[4:]))
+        elif self.name == "setup":
+            self.draw_setup()
+        elif self.name.startswith("key"):
+            self.draw_key_editor(int(self.name[3:]))
+        elif self.name.startswith("exec"):
+            self.draw_exec_entry(int(self.name[4:]))
         else:
             self.draw_main()
 
@@ -1010,6 +1032,114 @@ class Screen:
         save_config(self.b.cfg)
         print(f"Encoder {i + 1} now controls {choice}.")
 
+    # ---- Setup: what each hardware key does
+    KEY_CHOICES = [
+        ("Executor...", "exec"), ("Page -", {"page": -1}), ("Page +", {"page": 1}), ("Clear", {"key": "Clear"}),
+        ("Oops", {"cmd": "Oops"}), ("Please", {"key": "Please"}), ("Go +", {"cmd": "Go+"}), ("Go -", {"cmd": "Go-"}),
+        ("Pause", {"cmd": "Pause"}), ("Highlight", {"cmd": "Highlight"}), ("Blind", {"cmd": "Blind"}),
+        ("Last", {"cmd": "Previous"}), ("Next", {"cmd": "Next"}), ("Store", {"key": "Store"}),
+        ("Update", {"key": "Update"}), ("Keypad", {"screen": "keypad"}), ("Encoders", {"screen": "encoders"}),
+        ("Enc. 1/2", {"encpage": 1}), ("Nothing", {}),
+    ]
+
+    def in_setup(self):
+        return self.name == "setup" or self.name.startswith(("key", "exec"))
+
+    @classmethod
+    def describe(cls, act):
+        if not act:
+            return "-"
+        if "exec" in act:
+            return f"Exec {act['exec']}"
+        for label, a in cls.KEY_CHOICES:
+            if a == act:
+                return label
+        if "cmd" in act:
+            return act["cmd"]
+        if "key" in act:
+            return act["key"]
+        if "label" in act:
+            return act["label"]
+        return "?"
+
+    def key_act(self, i):
+        keys = self.b.cfg["keys"]
+        return keys[i] if i < len(keys) else None
+
+    def set_key(self, i, act):
+        keys = self.b.cfg["keys"]
+        while len(keys) <= i:
+            keys.append(None)
+        keys[i] = act or None
+        save_config(self.b.cfg)
+        print(f"Key {i + 1} now: {self.describe(act)}")
+        self.set_screen("setup")
+
+    def setup_title(self, y, text):
+        self.widget(self.SET_TITLE, "L", 4, y, self.w - 8, 40, C_PANEL, C_TEXT, C_PANEL, 0, 0, 0, text)
+
+    def draw_setup(self):
+        """All 20 keys and what they do. Press a key on the controller (or tap
+        it here) to change it."""
+        w = self.w
+        top = self.header_h() + 4
+        self.keymap = {}
+        self.setup_title(top, "Press a key on the controller\n(or tap it here) to change it")
+        hw = self.b.cfg["hw"]["keys"]
+        n = max(20, len(hw))
+        cols = 4
+        rows = -(-n // cols)
+        gy = top + 44
+        bw, bh = (w - 4) // cols, (self.h - 62 - 44 - gy) // rows
+        for k in range(n):
+            r, c = divmod(k, cols)
+            wid = self.SET0 + k
+            learnt = k < len(hw) and hw[k]
+            self.keymap[wid] = {"edit": k}
+            self.widget(wid, "B", 4 + c * bw, gy + r * bh, bw - 3, bh - 4, C_BTN if learnt else C_PANEL,
+                        C_TEXT if learnt else C_DIM, C_BTN_ON, 0, 0, 0, f"{k + 1}\n{self.describe(self.key_act(k))}")
+        self.keymap[self.SET_RESET] = {"reset_keys": True}
+        self.widget(self.SET_RESET, "B", 4, self.h - 104, w - 8, 40, C_PANEL, C_DIM, C_BTN_ON, 0, 0, 0,
+                    "Set all keys back to defaults")
+        self.back_button()
+
+    def draw_key_editor(self, i):
+        w = self.w
+        top = self.header_h() + 4
+        self.keymap = {}
+        self.setup_title(top, f"Key {i + 1}: {self.describe(self.key_act(i))}\nchoose what it does")
+        cols = 4 if self.portrait else 5
+        rows = -(-len(self.KEY_CHOICES) // cols)
+        gy = top + 44
+        bw, bh = (w - 4) // cols, min(70, (self.h - 62 - gy) // rows)
+        cur = self.key_act(i) or {}
+        for n, (label, act) in enumerate(self.KEY_CHOICES):
+            r, c = divmod(n, cols)
+            wid = self.SET0 + n
+            self.keymap[wid] = {"assign": i, "choice": act}
+            on = act == cur or (act == "exec" and "exec" in cur)
+            self.widget(wid, "B", 4 + c * bw, gy + r * bh, bw - 3, bh - 4, C_KEY2 if act == "exec" else C_BTN,
+                        C_TEXT, C_BTN_ON, 0, 0, 1 if on else 0, label)
+        self.back_button()
+
+    def exec_title(self, i):
+        return f"Key {i + 1}: executor number\n{self.exec_entry or '_'}"
+
+    def draw_exec_entry(self, i):
+        w = self.w
+        top = self.header_h() + 4
+        self.keymap = {}
+        self.widget(self.SET_TITLE, "L", 4, top, w - 8, 60, "000000", C_CMD, "000000", 1, 0, 0, self.exec_title(i))
+        gy = top + 66
+        bw, bh = (w - 4) // 3, (self.h - 62 - gy) // 4
+        for n, d in enumerate(["7", "8", "9", "4", "5", "6", "1", "2", "3", "<-", "0", "OK"]):
+            r, c = divmod(n, 3)
+            wid = self.SET0 + n
+            self.keymap[wid] = {"digit": d, "key": i}
+            self.widget(wid, "B", 4 + c * bw, gy + r * bh, bw - 3, bh - 4,
+                        C_BTN_ON if d == "OK" else C_BTN if d.isdigit() else C_KEY2, C_TEXT, C_BTN_ON, 1, 0, 0, d)
+        self.back_button()
+
     # ---- live updates
     def button_lit(self, btn):
         ma = self.b.ma
@@ -1080,8 +1210,45 @@ class Screen:
         self.draw()
 
     def on_press(self, wid):
-        act = self.keymap.get(wid)
+        act = self.keymap.get(wid) or self.keymap_hdr.get(wid)
         if not act:
+            return
+        if "setup" in act:
+            self.set_screen("main" if self.in_setup() else "setup")
+            return
+        if "edit" in act:
+            self.set_screen(f"key{act['edit']}")
+            return
+        if "assign" in act:
+            i, choice = act["assign"], act["choice"]
+            if choice == "exec":
+                self.exec_entry = ""
+                self.set_screen(f"exec{i}")
+                return
+            self.set_key(i, choice)
+            return
+        if "digit" in act:
+            d = act["digit"]
+            if d == "<-":
+                self.exec_entry = self.exec_entry[:-1]
+            elif d == "OK":
+                if self.exec_entry:
+                    self.set_key(act["key"], {"exec": int(self.exec_entry)})
+                return
+            elif len(self.exec_entry) < 4:
+                self.exec_entry = (self.exec_entry + d).lstrip("0")
+            self.setw(self.SET_TITLE, text=self.exec_title(act["key"]))
+            return
+        if "reset_keys" in act:
+            if time.time() - self.reset_armed > 4:  # first tap: ask for a second one
+                self.reset_armed = time.time()
+                self.setw(self.SET_RESET, text="Tap again to reset all 20 keys", colors=(C_WAIT, C_CMD, C_BTN_ON))
+                return
+            self.reset_armed = 0.0
+            self.b.cfg["keys"] = copy.deepcopy(DEFAULTS["keys"])
+            save_config(self.b.cfg)
+            print("Keys set back to the defaults.")
+            self.draw()
             return
         if "keypad" in act:
             if act["keypad"] == "Back":
@@ -1089,7 +1256,9 @@ class Screen:
             else:
                 self.b.ma_key(act["keypad"])
         elif "back" in act:
-            self.set_screen("encoders" if self.name.startswith("pick") else "main")
+            self.set_screen("encoders" if self.name.startswith("pick") else
+                            "setup" if self.name.startswith("key") else
+                            f"key{self.name[4:]}" if self.name.startswith("exec") else "main")
         elif "choice" in act:
             self.assign_encoder(act["pick"], act["choice"])
             self.set_screen("encoders")
@@ -1102,7 +1271,8 @@ class Screen:
 
     def on_release(self, wid):
         act = self.keymap.get(wid)
-        if act and not any(k in act for k in ("keypad", "back", "pick", "encpage")):
+        if act and not any(k in act for k in ("keypad", "back", "pick", "encpage", "edit", "assign",
+                                              "digit", "reset_keys")):
             self.b.do_action(act, False)
 
     def local_key(self, k):
@@ -1186,6 +1356,7 @@ class Bridge:
         self.ma = dict(alive=0.0, page=None, fader={}, run={}, name={}, master={}, cmdline="",
                        busy="", busy_at=0.0, res={}, color={},
                        feat=("", "", False), encn=0, encs={}, ver=None, linked_at=0.0)  # MA's encoders (see report_encoders)
+        self.keys_down = set()               # hardware keys whose press was acted on
         self.enc_page = 0                    # which pair of MA's encoders the hardware ones follow
         self.enc_edge_at = [0.0, 0.0]        # encoder click-size auto-detection
         self.enc_checked = [0.0, 0.0]
@@ -1433,6 +1604,20 @@ class Bridge:
             if v is not None and time.time() - self.fader_cmd_at[i] >= self.fader_interval(fmt):
                 self.send_fader(i, v)
 
+    def key_event(self, i, down):
+        if down and self.pi_ready and self.screen.in_setup():  # Setup: pressing a key picks it
+            self.screen.set_screen(f"key{i}")
+            return
+        if not down and i not in self.keys_down:
+            return  # its press went to Setup: MA never saw it
+        if down:
+            self.keys_down.add(i)
+        else:
+            self.keys_down.discard(i)
+        act = self.cfg["keys"][i] if i < len(self.cfg["keys"]) else None
+        if act:
+            self.do_action(act, down)
+
     def do_action(self, act, down):
         if "exec" in act:
             self.osc(f"/Page{self.page}/Key{act['exec']}", 1 if down else 0)
@@ -1451,6 +1636,8 @@ class Bridge:
             self.set_page(self.page + int(act["page"]))
         elif "screen" in act:
             self.screen.set_screen(act["screen"] if self.screen.name != act["screen"] else "main")
+        elif "encpage" in act:
+            self.next_enc_page()
 
     def set_page(self, page, from_ma=False):
         page = max(1, page)
@@ -1508,9 +1695,7 @@ class Bridge:
             what = self.matrix.get((int(k.group(1)), int(k.group(2))))
             down = k.group(3) == "1"
             if what and what[0] == "key":
-                act = self.cfg["keys"][what[1]] if what[1] < len(self.cfg["keys"]) else None
-                if act:
-                    self.do_action(act, down)
+                self.key_event(what[1], down)
             elif what:
                 self.encoder_push(what[1], down)
             return
@@ -1533,10 +1718,7 @@ class Bridge:
         if not what:
             return
         if what[0] == "key":
-            i = what[1]
-            act = self.cfg["keys"][i] if i < len(self.cfg["keys"]) else None
-            if act:
-                self.do_action(act, v == 0)
+            self.key_event(what[1], v == 0)
         else:
             i, part = what[1], what[2]
             e = self.cfg["hw"]["encoders"][i]

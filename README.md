@@ -232,13 +232,17 @@ letter.
 | Control | Does |
 |---------|------|
 | Faders 1–5 | Executor faders 201–205 on the current page |
-| Keys 1–5 | Executor 201–205 buttons |
-| Keys 6–15 | Executor 101–110 buttons |
-| Keys 16 / 17 | Page − / Page + |
-| Keys 18 / 19 / 20 | Clear / Go+ / Oops |
+| Keys 1–5 | Page − / Page + / Clear / Oops / Please |
+| Keys 6–10 | Executor 301–305 buttons |
+| Keys 11–15 | Executor 201–205 buttons |
+| Keys 16–20 | Executor 101–105 buttons |
 | Encoder 1 | Dimmer ± 1 per click (± 0.1 when MA's Dimmer encoder resolution is Fine); push = toggle Coarse/Fine in MA |
 | Encoder 2 | Page −/+; push = Keypad screen |
 | Touchscreen | Main page: the 5 faders in their MA sequence colours (MA level + physical position, names); Page −/+, Clear, Highlight, Last, Next, Blind, Keypad, Encoders. Keypad page: a full command keypad. Encoders page: follows MA's encoders (below) |
+
+**Changing what a key does:** tap **Setup** at the top of the touchscreen, press the
+key on the controller (or tap it in the list) and pick a function, or
+**Executor...** to type an executor number. Saved straight away.
 
 Actions are one of `{"exec": 201}`, `{"key": "Store"}` (a console key typed into
 MA's command line; `"Please"`, `"Clear"` and `"<-"` act on the line), `{"cmd": "Go+"}`
