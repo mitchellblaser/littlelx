@@ -1,0 +1,39 @@
+# littlelx - Raspberry Pi 3B touchscreen front panel
+# The Pi never writes to this card. Edit this file from your computer if needed.
+
+start_file=start_cd.elf
+fixup_file=fixup_cd.dat
+kernel=zImage
+gpu_mem=16
+boot_delay=0
+disable_splash=1
+disable_overscan=1
+camera_auto_detect=0
+display_auto_detect=0
+
+# ---- Display: Waveshare 3.5" (A) / LCD-show style ILI9486 + XPT2046 touch ----
+# rotate=90 or 270 = landscape (swap them if the picture is upside down).
+# Garbled picture? lower speed to 16000000. Want it snappier? try 32000000.
+dtparam=spi=on
+dtoverlay=piscreen,speed=24000000,rotate=90,fps=50
+
+# ---- UART to the Mega: GPIO14 = Pi TX, GPIO15 = Pi RX, 115200 baud ----
+# Bluetooth gives the good UART back to the header; wifi is off to save power.
+enable_uart=1
+dtoverlay=disable-bt
+dtoverlay=disable-wifi
+
+# ---- Performance ----
+# Fixed clocks so the SPI clock never changes mid-frame, plus a mild overclock.
+# NOTE: the firmware still drops to 600MHz whenever it sees under-voltage, which
+# is what a bus-powered Pi 3 does. A solid 5V 2.5A supply is the real speed-up.
+# If the Pi ever locks up or reboots randomly, delete these five lines first.
+force_turbo=1
+arm_freq=1300
+core_freq=450
+sdram_freq=450
+over_voltage=2
+
+# Less power draw (helps a bus-powered Pi): no activity LED, no audio.
+dtparam=act_led_trigger=none
+dtparam=audio=off

@@ -1,0 +1,61 @@
+# littlelx kernel: everything built in, no modules, no console, root in RAM.
+# CONFIG_MODULES is not set
+CONFIG_BLK_DEV_INITRD=y
+CONFIG_INITRAMFS_COMPRESSION_GZIP=y
+CONFIG_DEVTMPFS=y
+CONFIG_TMPFS=y
+# Display: ILI9486 SPI panel via fbtft (piscreen overlay)
+CONFIG_STAGING=y
+CONFIG_FB=y
+CONFIG_FB_DEVICE=y
+CONFIG_FB_TFT=y
+CONFIG_FB_TFT_ILI9486=y
+CONFIG_SPI=y
+CONFIG_SPI_BCM2835=y
+# No HDMI framebuffer or text console: the panel is /dev/fb0
+# CONFIG_FB_BCM2708 is not set
+# CONFIG_FRAMEBUFFER_CONSOLE is not set
+# CONFIG_LOGO is not set
+# CONFIG_DRM is not set
+# Touch: XPT2046 / ADS7846
+CONFIG_INPUT_EVDEV=y
+CONFIG_INPUT_TOUCHSCREEN=y
+CONFIG_TOUCHSCREEN_ADS7846=y
+# UART to the Mega (PL011)
+CONFIG_SERIAL_AMBA_PL011=y
+# Reboot if the app ever wedges
+CONFIG_WATCHDOG=y
+CONFIG_BCM2835_WDT=y
+# Not needed on a front panel
+# CONFIG_NET is not set
+# CONFIG_SOUND is not set
+# CONFIG_MEDIA_SUPPORT is not set
+# CONFIG_BLK_DEV_SD is not set
+# CONFIG_MD is not set
+# CONFIG_NFS_FS is not set
+# CONFIG_EXT4_FS is not set
+# CONFIG_BTRFS_FS is not set
+# CONFIG_DEBUG_INFO is not set
+# CONFIG_DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT is not set
+# CONFIG_IKCONFIG is not set
+# CONFIG_KALLSYMS is not set
+# CONFIG_FTRACE is not set
+# CONFIG_PROFILING is not set
+# CONFIG_SWAP is not set
+# CONFIG_CGROUPS is not set
+# CONFIG_NAMESPACES is not set
+# CONFIG_AUDIT is not set
+CONFIG_EXPERT=y
+# Linux never touches the SD card or USB: the card cannot be corrupted by a
+# power cut, and the Pi 3's USB controller (thousands of IRQs/s) stays idle.
+# CONFIG_BLOCK is not set
+# CONFIG_MMC is not set
+# CONFIG_USB_SUPPORT is not set
+# CONFIG_HID is not set
+# CONFIG_INPUT_KEYBOARD is not set
+# CONFIG_INPUT_MOUSE is not set
+# CONFIG_INPUT_JOYSTICK is not set
+# CONFIG_VT is not set
+# CONFIG_IIO is not set
+# CONFIG_KEYS is not set
+# CONFIG_MAGIC_SYSRQ is not set

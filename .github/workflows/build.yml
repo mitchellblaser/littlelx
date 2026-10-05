@@ -1,0 +1,36 @@
+name: build
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  pi-image:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-arm-linux-gnueabihf libc6-dev-armhf-cross \
+            make flex bison bc libssl-dev dosfstools mtools fdisk
+      - name: Build SD card image
+        run: ./pi/build.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: littlelx-sdcard
+          path: pi/out/littlelx-sdcard.img.gz
+
+  mega-firmware:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: arduino/setup-arduino-cli@v2
+      - name: Compile
+        run: |
+          arduino-cli core install arduino:avr
+          arduino-cli compile --fqbn arduino:avr:mega --output-dir out mega/littlelx_mega
+      - uses: actions/upload-artifact@v4
+        with:
+          name: littlelx-mega-hex
+          path: out/littlelx_mega.ino.hex
