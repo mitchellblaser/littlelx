@@ -10,6 +10,7 @@ This script turns faders/keys/encoders into OSC for MA3 and draws the screen.
   littlelx.py --calibrate   calibrate the touchscreen
   littlelx.py --faders      calibrate fader bottom/top (after --learn)
   littlelx.py --monitor     print everything the Mega sends
+  littlelx.py --probe       show how key-matrix pins connect (hold a key)
   littlelx.py --update-pi littlelx-pi-update.zip
                             update the touchscreen's firmware over USB
   littlelx.py --port COM5   use a specific serial port
@@ -1177,6 +1178,41 @@ def calibrate(cfg):
         print("No calibration received.")
 
 
+def probe(cfg):
+    """Show, live, which pins connect when keys are held (wiring diagnostics)."""
+    ser = connect(cfg)
+    ser.send("?")
+    info = {}
+    end = time.time() + 2
+    while time.time() < end:
+        l = wait_line(ser, lambda l: l.startswith(("MX", "AN")), 0.5)
+        if l:
+            info[l[:2]] = l[2:].strip()
+    print("Pins scanned for key matrices:", info.get("MX", "?"))
+    print("Analog inputs (faders):      ", info.get("AN", "?"))
+    print("\nHold a key (or several). Ctrl-C to stop.\n")
+    last = None
+    while True:
+        ser.send("X")
+        rest, links = "", []
+        while True:
+            l = wait_line(ser, lambda l: l.startswith("X"), 2)
+            if l is None or l == "XE":
+                break
+            if l.startswith("XR"):
+                rest = l[2:].strip()
+            else:
+                p, *qs = l[1:].split()
+                links.append(f"{p}->{','.join(qs)}")
+        now = (rest, tuple(links))
+        if now != last:
+            last = now
+            print(time.strftime("%H:%M:%S"),
+                  "| low at rest:", rest or "-",
+                  "| pulling a pin low also pulls:", " ".join(links) or "nothing")
+        time.sleep(0.3)
+
+
 def monitor(cfg):
     ser = connect(cfg)
     ser.send("?")
@@ -1298,6 +1334,7 @@ def main():
     ap.add_argument("--calibrate", action="store_true", help="calibrate the touchscreen")
     ap.add_argument("--faders", action="store_true", help="calibrate fader bottom/top")
     ap.add_argument("--monitor", action="store_true", help="print raw events")
+    ap.add_argument("--probe", action="store_true", help="key-matrix wiring diagnostics")
     ap.add_argument("--port", help="serial port (default: auto-detect)")
     ap.add_argument("--update-pi", metavar="ZIP", help="update the touchscreen firmware")
     args = ap.parse_args()
@@ -1319,6 +1356,8 @@ def main():
             calibrate(cfg)
         elif args.monitor:
             monitor(cfg)
+        elif args.probe:
+            probe(cfg)
         else:
             print(f"Sending OSC to {cfg['osc']['host']}:{cfg['osc']['port']} prefix '{cfg['osc']['prefix']}'")
             Bridge(cfg).run()

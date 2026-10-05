@@ -18,6 +18,8 @@
  *     D<pin> <0|1>        digital pin changed (pullups: 0 = pressed)
  *     A<ch> <0..1023>     analog input A<ch> changed
  *     K<a> <b> <1|0>      matrix key between pins a < b pressed / released
+ *     MX <pins...>        (after ?) pins in the matrix scan
+ *     AN <channels...>    (after ?) analog inputs (faders)
  *     ><text>             line from the Pi
  *   computer -> Mega
  *     ?                   HELLO, PI and a dump of every input
@@ -25,6 +27,9 @@
  *                         add 8 for no debounce (rotary encoders)
  *     ><text>             send line to the Pi (streamed through byte by byte,
  *                         so lines of any length and full-speed updates work)
+ *     X                   matrix probe (diagnostics, raw, no debounce):
+ *                         XR <pins LOW at rest>, X<p> <pins that follow p
+ *                         when p is pulled LOW>..., XE
  *     R<addr> <len>       read EEPROM (len <= 32)       -> E<addr> <hex>
  *     W<addr> <hex>       write EEPROM (<= 32 bytes)    -> W<addr> OK
  *
@@ -33,7 +38,10 @@
  *     2-71   pin modes    applied at power-up (0xff = default)
  *     128-   learned setup blob (the computer's format; the Mega only stores it)
  *
- * Defaults: D2-D53 = input+pullup (debounced), A0-A15 = analog.
+ * Defaults: D2-D53 = input+pullup (debounced). A0-A15 are tested at power-up:
+ * a pin driven by something (a fader wiper) stays analog; a floating one (a
+ * matrix line, a button to GND, or nothing) becomes input+pullup, so key
+ * matrices on analog pins are scanned too. A learned setup in EEPROM wins.
  * Matrix scanning uses every pin in mode 2 (pullup, debounced); encoders
  * (mode 10) and analog pins are left out.
  * Pins 0/1 (USB) and 14/15 (Pi) are not scanned; everything else is.
@@ -133,6 +141,20 @@ static void dump_all()
 {
 	Serial.println(F("HELLO littlelx-mega 1"));
 	Serial.println(F("PI 3"));
+	Serial.print(F("MX"));
+	for (uint8_t p = 2; p < NPINS; p++)
+		if (mode[p] == M_PULLUP && !pin_reserved(p)) {
+			Serial.print(' ');
+			Serial.print(p);
+		}
+	Serial.println();
+	Serial.print(F("AN"));
+	for (uint8_t ch = 0; ch < 16; ch++)
+		if ((mode[54 + ch] & 7) == M_ANALOG) {
+			Serial.print(' ');
+			Serial.print(ch);
+		}
+	Serial.println();
 	for (uint8_t p = 0; p < NPINS; p++) {
 		uint8_t m = mode[p] & 7;
 		if (pin_reserved(p) || m == M_OFF)
@@ -152,9 +174,37 @@ static uint8_t hexval(char c)
 	return c <= '9' ? c - '0' : (c | 0x20) - 'a' + 10;
 }
 
+static bool drive_low_and_read(uint8_t p, uint8_t *follow, uint8_t *nf);
+
+static void probe()
+{
+	Serial.print(F("XR"));
+	for (uint8_t p = 2; p < NPINS; p++)
+		if (mode[p] == M_PULLUP && !pin_reserved(p) && !(*pinreg[p] & pinmask[p])) {
+			Serial.print(' ');
+			Serial.print(p);
+		}
+	Serial.println();
+	uint8_t follow[NPINS], nf;
+	for (uint8_t p = 2; p < NPINS; p++) {
+		if (mode[p] != M_PULLUP || pin_reserved(p) || !drive_low_and_read(p, follow, &nf) || !nf)
+			continue;
+		Serial.print('X');
+		Serial.print(p);
+		for (uint8_t i = 0; i < nf; i++) {
+			Serial.print(' ');
+			Serial.print(follow[i]);
+		}
+		Serial.println();
+	}
+	Serial.println(F("XE"));
+}
+
 static void usb_line(char *s)
 {
-	if (s[0] == 'R') {
+	if (s[0] == 'X') {
+		probe();
+	} else if (s[0] == 'R') {
 		char *sp;
 		long a = strtol(s + 1, &sp, 10);
 		long n = strtol(sp, NULL, 10);
@@ -329,6 +379,36 @@ static void mx_cycle_done()
 	mx_nfound = 0;
 }
 
+/* Pull pin p LOW for a moment and list the other candidate pins (high at
+ * rest) that follow it. Returns false if p itself is low at rest. */
+static bool drive_low_and_read(uint8_t p, uint8_t *follow, uint8_t *nf)
+{
+	*nf = 0;
+	if (!(*pinreg[p] & pinmask[p]))
+		return false;
+	uint8_t rest[NPINS / 8 + 1] = { 0 };
+	for (uint8_t q = 2; q < NPINS; q++)
+		if (mode[q] == M_PULLUP && !pin_reserved(q) && (*pinreg[q] & pinmask[q]))
+			rest[q >> 3] |= 1 << (q & 7);
+	uint8_t m = pinmask[p];
+	uint8_t sreg = SREG;
+	cli();
+	*portreg[p] &= ~m; /* pull-up off ... */
+	*ddrreg[p] |= m;   /* ... then drive low */
+	SREG = sreg;
+	delayMicroseconds(10);
+	for (uint8_t q = 2; q < NPINS; q++)
+		if (q != p && (rest[q >> 3] & (1 << (q & 7))) && !(*pinreg[q] & pinmask[q]))
+			follow[(*nf)++] = q;
+	sreg = SREG;
+	cli();
+	*ddrreg[p] &= ~m;  /* back to input ... */
+	*portreg[p] |= m;  /* ... with pull-up */
+	SREG = sreg;
+	delayMicroseconds(10); /* let the line recover before anything reads it */
+	return true;
+}
+
 /* Drive one candidate pin LOW per call and see which others follow. */
 static void scan_matrix()
 {
@@ -344,25 +424,11 @@ static void scan_matrix()
 	if (mx_n < 2)
 		return;
 	uint8_t p = mx_pins[mx_idx];
-	if (state[p]) { /* skip pins already low at rest (direct button held) */
-		uint8_t m = pinmask[p];
-		uint8_t sreg = SREG;
-		cli();
-		*portreg[p] &= ~m; /* pull-up off ... */
-		*ddrreg[p] |= m;   /* ... then drive low */
-		SREG = sreg;
-		delayMicroseconds(4);
-		for (uint8_t k = 0; k < mx_n; k++) {
-			uint8_t q = mx_pins[k];
-			if (q != p && state[q] && !(*pinreg[q] & pinmask[q]))
-				mx_note(p, q);
-		}
-		sreg = SREG;
-		cli();
-		*ddrreg[p] &= ~m;  /* back to input ... */
-		*portreg[p] |= m;  /* ... with pull-up */
-		SREG = sreg;
-	}
+	uint8_t follow[NPINS], nf;
+	if (drive_low_and_read(p, follow, &nf))
+		for (uint8_t i = 0; i < nf; i++)
+			if (mode[follow[i]] == M_PULLUP)
+				mx_note(p, follow[i]);
 	if (++mx_idx >= mx_n) {
 		mx_idx = 0;
 		mx_cycle_done();
@@ -427,6 +493,37 @@ static void scan_analog()
 	adc_busy = 1;
 }
 
+/* Blocking conversion for the power-up test. mux 0x1f = internal 0 V. */
+static uint16_t adc_once(uint8_t mux)
+{
+	ADCSRB = (mux != 0x1f && (mux & 8)) ? _BV(MUX5) : 0;
+	ADMUX = _BV(REFS0) | (mux == 0x1f ? 0x1f : (mux & 7));
+	ADCSRA |= _BV(ADSC);
+	while (ADCSRA & _BV(ADSC))
+		;
+	return ADC;
+}
+
+/* Is analog input ch floating (nothing driving it)? A fader wiper reads the
+ * same with or without the pull-up; a floating pin sits near 0 after the
+ * sample capacitor is emptied, but jumps to the top with the pull-up on. */
+static bool analog_floats(uint8_t ch)
+{
+	uint8_t p = 54 + ch;
+	uint16_t lo = 0, hi = 0;
+	pinMode(p, INPUT);
+	for (uint8_t i = 0; i < 16; i++) {
+		adc_once(0x1f);
+		lo = adc_once(ch);
+	}
+	pinMode(p, INPUT_PULLUP);
+	delay(2);
+	adc_once(ch);
+	hi = adc_once(ch);
+	pinMode(p, INPUT);
+	return lo <= 100 && hi >= 1000;
+}
+
 void setup()
 {
 	Serial.begin(500000);
@@ -437,7 +534,10 @@ void setup()
 		portreg[p] = portOutputRegister(digitalPinToPort(p));
 		ddrreg[p] = portModeRegister(digitalPinToPort(p));
 		mode[p] = p >= 54 ? M_ANALOG : M_PULLUP;
-		if (EEPROM.read(0) == 'L' && EEPROM.read(1) == 'X') {
+		bool learned = EEPROM.read(0) == 'L' && EEPROM.read(1) == 'X';
+		if (p >= 54 && !learned && analog_floats(p - 54))
+			mode[p] = M_PULLUP;
+		if (learned) {
 			uint8_t m = EEPROM.read(2 + p); /* learned setup */
 			if (m != 0xff && (m & 7) <= M_ANALOG && !((m & 7) == M_ANALOG && p < 54))
 				mode[p] = m;
