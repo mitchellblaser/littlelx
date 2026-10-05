@@ -6,7 +6,8 @@
  * draws them on the SPI panel and reports touches back. Nothing is ever
  * written to the SD card.
  *
- * Wire protocol (text lines, 115200 8N1 on /dev/ttyAMA0):
+ * Wire protocol (text lines, 8N1 on /dev/ttyAMA0 at 250000 baud; 500000 is
+ * tried too while nothing valid arrives, for older Mega firmware):
  *
  *   computer -> panel
  *     ?                                   reply with HELLO
@@ -24,7 +25,8 @@
  *     M id value                          marker line on a bar (0..1000, -1 none),
  *                                         e.g. where the physical fader is
  *   Any line may end in "*hh": XOR of all bytes before the '*', as two hex
- *   digits. Lines whose checksum doesn't match are dropped.
+ *   digits. Lines whose checksum doesn't match are dropped. Every line the
+ *   panel sends carries one.
  *     D id                                delete widget
  *     K a b c d e f                       touch calibration: x=a*rx+b*ry+c, y=d*rx+e*ry+f
  *     CAL                                 run touch calibration on the panel
@@ -39,7 +41,9 @@
  *                                         UART errors, lost = tty buffer full)
  *     P id / R id                         button press / release
  *     S id value                          bar dragged to value
- *     CALD a b c d e f                    calibration result (store it, send back with K)
+ *     CALSTART                            calibration screen is up (answer to CAL)
+ *     CALD a b c d e f                    calibration result; repeated every second
+ *                                         until the computer answers with K (saved)
  */
 #define _GNU_SOURCE
 #include <dirent.h>
@@ -71,6 +75,10 @@
 
 static void klog(const char *msg);
 static void send_hello(void);
+int set_baud(int fd, int baud); /* baud.c */
+
+static const int bauds[] = { 250000, 500000 };
+static int baud_i;
 
 #ifndef LLX_VERSION
 #define LLX_VERSION "dev"
@@ -109,6 +117,8 @@ static int cal_valid;
 static int raw_min_x, raw_max_x, raw_min_y, raw_max_y;
 
 static int calibrating, cal_step;
+static int cal_unsaved; /* CALD sent, no K back yet */
+static long long cal_sent_at;
 static int cal_raw[3][2];
 
 static int touch_id = -1; /* widget being touched */
@@ -148,8 +158,12 @@ static void send_line(const char *fmt, ...)
 	va_end(ap);
 	if (n < 0)
 		return;
-	if (n > (int)sizeof(buf) - 2)
-		n = sizeof(buf) - 2;
+	if (n > (int)sizeof(buf) - 6)
+		n = sizeof(buf) - 6;
+	uint8_t x = 0; /* checksum, see the protocol notes at the top */
+	for (int i = 0; i < n; i++)
+		x ^= (uint8_t)buf[i];
+	n += snprintf(buf + n, 5, "*%02X", x);
 	buf[n++] = '\n';
 	if (tty >= 0) {
 		int off = 0;
@@ -862,7 +876,8 @@ static void upd_line(char *args)
 
 static unsigned long lines_ok, lines_bad;
 
-/* Lines may end in "*hh" (XOR of the bytes before '*'). Returns 0 = drop. */
+/* Lines may end in "*hh" (XOR of the bytes before '*').
+ * Returns 0 = damaged (drop), 1 = no checksum, 2 = verified. */
 static int checksum_ok(char *line)
 {
 	size_t n = strlen(line);
@@ -876,7 +891,7 @@ static int checksum_ok(char *line)
 	for (size_t i = 0; i < n - 3; i++)
 		x ^= (uint8_t)line[i];
 	line[n - 3] = 0;
-	return x == want;
+	return x == want ? 2 : 0;
 }
 
 static void handle_line(char *line)
@@ -884,14 +899,20 @@ static void handle_line(char *line)
 	char *f[12];
 	widget_t *w;
 
-	if (!checksum_ok(line)) {
+	int ck = checksum_ok(line);
+	if (!ck) {
 		lines_bad++;
 		return; /* damaged on the way: the bridge re-sends everything regularly */
 	}
 	lines_ok++;
-
-	last_rx = now_ms();
-	set_online(1);
+	/* Only lines we can trust say "the computer is there" (and lock the baud
+	 * rate): garbage received at the wrong speed must not. */
+	if (ck == 2 || !strcmp(line, "?") || !strcmp(line, "PING")) {
+		last_rx = now_ms();
+		set_online(1);
+	} else if (!online) {
+		return;
+	}
 
 	if (!strcmp(line, "?")) {
 		send_hello();
@@ -907,7 +928,9 @@ static void handle_line(char *line)
 	} else if (!strncmp(line, "UPD ", 4)) {
 		upd_line(line + 4);
 	} else if (!strcmp(line, "CAL")) {
-		start_calibration();
+		if (!calibrating)
+			start_calibration();
+		send_line("CALSTART");
 	} else if (line[0] == 'W' && line[1] == ' ') {
 		char *rest = fields(line + 2, f, 12);
 		if (!(w = get_w(f[0])))
@@ -968,6 +991,7 @@ static void handle_line(char *line)
 		if (sscanf(line + 2, "%lf %lf %lf %lf %lf %lf", &cal[0], &cal[1], &cal[2],
 			   &cal[3], &cal[4], &cal[5]) == 6)
 			cal_valid = 1;
+		cal_unsaved = 0; /* the computer has (and stored) a calibration */
 	}
 }
 
@@ -1045,6 +1069,8 @@ static void calibration_tap(int rx, int ry)
 	cal_valid = 1;
 	calibrating = 0;
 	send_line("CALD %.6f %.6f %.3f %.6f %.6f %.3f", cal[0], cal[1], cal[2], cal[3], cal[4], cal[5]);
+	cal_unsaved = 15; /* resend up to 15 times until K comes back */
+	cal_sent_at = now_ms();
 	mark_all();
 }
 
@@ -1182,6 +1208,7 @@ static int open_tty(const char *path)
 	t.c_cflag |= CLOCAL | CREAD;
 	t.c_cflag &= ~CRTSCTS;
 	tcsetattr(fd, TCSANOW, &t);
+	set_baud(fd, bauds[baud_i]);
 	tcflush(fd, TCIOFLUSH);
 	return fd;
 }
@@ -1314,6 +1341,23 @@ static int app(void)
 			klog("update timed out");
 			upd_close();
 		}
+		/* Nothing valid for a while: try the other baud rate (the Mega's
+		 * firmware decides; 250000 now, 500000 on older versions). */
+		static long long last_switch;
+		if (!last_switch)
+			last_switch = t; /* give the first rate a full try */
+		if (!online && tty >= 0 && t - last_rx > 3000 && t - last_switch > 3000) {
+			last_switch = t;
+			baud_i = (baud_i + 1) % (int)(sizeof(bauds) / sizeof(bauds[0]));
+			set_baud(tty, bauds[baud_i]);
+			tcflush(tty, TCIOFLUSH);
+		}
+		if (cal_unsaved && t - cal_sent_at > 1000) {
+			cal_unsaved--;
+			cal_sent_at = t;
+			send_line("CALD %.6f %.6f %.3f %.6f %.6f %.3f", cal[0], cal[1], cal[2], cal[3], cal[4],
+				  cal[5]);
+		}
 		static long long last_stat;
 		if (online && tty >= 0 && t - last_stat > 10000) {
 			struct serial_icounter_struct ic = { 0 };
@@ -1334,7 +1378,8 @@ static int app(void)
 static void send_hello(void)
 {
 	send_line("HELLO littlelx-pi 3 %d %d %s", W, H, LLX_VERSION);
-	send_line("INFO fb=%s touch=%s", fbmem ? "ok" : "missing", touch >= 0 ? "ok" : "missing");
+	send_line("INFO fb=%s touch=%s baud=%d", fbmem ? "ok" : "missing", touch >= 0 ? "ok" : "missing",
+		  bauds[baud_i]);
 }
 
 /* --------------------------------------------------------------- PID 1 */

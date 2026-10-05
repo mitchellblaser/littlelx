@@ -273,6 +273,32 @@ def find_port(cfg):
     return None
 
 
+class Pacer:
+    """Keep a byte rate: the Mega relays at exactly the rate data arrives, so
+    full-speed bursts overflow its 64-byte buffer and drop bytes."""
+
+    def __init__(self, rate):
+        self.rate, self.free = rate, 0.0
+
+    def wait(self, nbytes):
+        now = time.time()
+        self.free = max(now, self.free) + nbytes / self.rate
+        if self.free - now > 0.003:
+            time.sleep(self.free - now - 0.003)
+
+
+def checksummed(line):
+    x = 0
+    for c in line.encode(errors="replace"):
+        x ^= c
+    return f"{line}*{x:02X}"
+
+
+PI_CK = re.compile(r"^>(.*)\*([0-9A-F]{2})$")
+PI_RATE = 12000   # bytes/s to the touchscreen: half of the 250k Mega<->Pi link
+PI_PIECE = 32     # bytes per write, so the Mega's 64-byte buffers never fill
+
+
 class Port:
     """Serial port to the Mega; a reader thread posts ("mega", port, line)."""
 
@@ -295,6 +321,9 @@ class Port:
                 import fcntl
                 fcntl.ioctl(self.fd, 0x80085402, struct.pack("L", BAUD))
         self.lock = threading.Lock()
+        self.pi_proto = 0        # touchscreen protocol, from its HELLO
+        self.pi_bad = 0          # lines from the touchscreen with a bad checksum
+        self.pacer = Pacer(PI_RATE)
         start_thread(self._reader)
 
     def _read(self):
@@ -316,15 +345,42 @@ class Port:
                 buf += self._read()
                 *done, buf = buf.split(b"\n")
                 for l in done:
-                    l = l.strip(b"\r")
+                    l = l.strip(b"\r").decode(errors="replace")
+                    if l.startswith(">"):  # from the touchscreen: verify + strip checksum
+                        m = PI_CK.match(l)
+                        if m:
+                            x = 0
+                            for c in m.group(1).encode(errors="replace"):
+                                x ^= c
+                            if x != int(m.group(2), 16):
+                                self.pi_bad += 1
+                                continue
+                            l = ">" + m.group(1)
+                        if l.startswith(">HELLO littlelx-pi"):
+                            p = l.split()
+                            self.pi_proto = int(p[2]) if len(p) > 2 and p[2].isdigit() else 1
                     if l:
-                        events.put(("mega", self, l.decode(errors="replace")))
+                        events.put(("mega", self, l))
         except Exception as e:  # unplugged
             if not self.closed:
                 events.put(("lost", self, str(e)))
 
     def send(self, line):
-        data = (line + "\n").encode(errors="replace")
+        """Lines starting with '>' go to the touchscreen: checksummed (if its
+        firmware understands it) and paced in small pieces. Everything that
+        talks to the Pi goes through here, so nothing can skip either."""
+        if line.startswith(">"):
+            body = line[1:]
+            if self.pi_proto >= 3:
+                body = checksummed(body)
+            data = (">" + body + "\n").encode(errors="replace")
+            for off in range(0, len(data), PI_PIECE):
+                self.pacer.wait(PI_PIECE)
+                self._write(data[off:off + PI_PIECE])
+            return
+        self._write((line + "\n").encode(errors="replace"))
+
+    def _write(self, data):
         with self.lock:
             if serial:
                 self.s.write(data)
@@ -786,8 +842,6 @@ def resource(*parts):
 
 
 class Bridge:
-    PI_TX_RATE = 20000   # bytes/s to the touchscreen, well under what the Mega relays
-
     def __init__(self, cfg):
         self.cfg = cfg
         self.page = cfg.get("page", 1)
@@ -809,7 +863,6 @@ class Bridge:
         self.encs = []
         self.pi_ready = False
         self.pi_proto = 0
-        self.tx_free_at = 0.0
         self.build_maps()
 
         o = cfg["osc"]
@@ -882,11 +935,19 @@ class Bridge:
         if self.pi_ready:
             self.screen.update_cmdline()
 
+    # The littlelx code lives in MA as hex pieces in global variables
+    # llx_1..llx_N (each prefixed with 'x' so MA never mistakes one for a
+    # number; MA drops empty strings and may limit long ones). This Lua
+    # rebuilds it and calls it with an argument.
+    MA_RUN = ("local g=GlobalVars() local n=tonumber(GetVar(g,'llx_n')) if n then "
+              "local t={} for i=1,n do t[i]=string.sub(tostring(GetVar(g,'llx_'..i)),2) end "
+              "local c=table.concat(t):gsub('..',function(x) return string.char(tonumber(x,16)) end) "
+              "load(c)()(nil,'{arg}') end")
+
     def ma_plugin(self, arg):
         """Run an action in the littlelx code installed in MA (see ma3/littlelx.lua)."""
         arg = re.sub(r"[^A-Za-z0-9 .+\-_<>/]", "", arg)
-        self.osc("/cmd", "Lua \"local c=GetVar(GlobalVars(),'llx_code') "
-                         f"if c then load(c)()(nil,'{arg}') end\"")
+        self.osc("/cmd", 'Lua "' + self.MA_RUN.replace("{arg}", arg) + '"')
         if self.verbose:
             print(f"MA: {arg}")
 
@@ -909,32 +970,19 @@ class Bridge:
         line, tick = int(conf.get("osc_line", 2)), float(conf.get("tick", 0.1))
         print(f"Installing littlelx into MA3 (it reports back on OSC line {line})...")
         self.ma_installed_at = time.time()
-        put = "Lua \"SetVar(GlobalVars(),'llx_src',GetVar(GlobalVars(),'llx_src')..'{}')\""
-        self.osc("/cmd", "Lua \"SetVar(GlobalVars(),'llx_src','')\"")
         h = src.hex()
-        for off in range(0, len(h), 240):
+        pieces = [h[off:off + 240] for off in range(0, len(h), 240)]
+        for i, piece in enumerate(pieces, 1):
+            self.osc("/cmd", f"Lua \"SetVar(GlobalVars(),'llx_{i}','x{piece}')\"")
             time.sleep(0.01)
-            self.osc("/cmd", put.format(h[off:off + 240]))
+        self.osc("/cmd", f"Lua \"SetVar(GlobalVars(),'llx_n',{len(pieces)})\"")
         time.sleep(0.05)
-        self.osc("/cmd", "Lua \"local h=GetVar(GlobalVars(),'llx_src') "
-                         "local c=h:gsub('..',function(x) return string.char(tonumber(x,16)) end) "
-                         "SetVar(GlobalVars(),'llx_code',c) "
-                         f"load(c)()(nil,'__start {line} {tick}')\"")
+        self.osc("/cmd", 'Lua "' + self.MA_RUN.replace("{arg}", f"__start {line} {tick}") + '"')
 
     def to_pi(self, line):
         if not self.ser:
             return
-        if self.pi_proto >= 3:  # checksum: the Pi drops lines damaged on the way
-            x = 0
-            for c in line.encode(errors="replace"):
-                x ^= c
-            line = f"{line}*{x:02X}"
-        # pace the output so the Mega's small serial buffers can't overflow
-        now = time.time()
-        self.tx_free_at = max(now, self.tx_free_at) + (len(line) + 2) / self.PI_TX_RATE
-        if self.tx_free_at - now > 0.05:
-            time.sleep(self.tx_free_at - now - 0.05)
-        try:
+        try:  # Port.send checksums and paces
             self.ser.send(">" + line)
         except Exception:
             pass  # reader thread reports the disconnect
@@ -1123,11 +1171,14 @@ class Bridge:
                 self.picked[i] = False  # the physical fader catches it again
                 self.screen.update_fader(i)
         elif parts[0] == "CALD":
-            self.cfg["touch_cal"] = [float(x) for x in parts[1:7]]
-            save_config(self.cfg)
-            print("Touch calibration saved")
-            save_to_mega(self.cfg, self.ser)
-            self.screen.draw()
+            cal = [float(x) for x in parts[1:7]]
+            self.to_pi("K " + " ".join(str(x) for x in cal))  # ack: stops the resends
+            if cal != self.cfg.get("touch_cal"):
+                self.cfg["touch_cal"] = cal
+                save_config(self.cfg)
+                print("Touch calibration saved")
+                save_to_mega(self.cfg, self.ser)
+                self.screen.draw()
 
     # ---- MA feedback
     def on_osc(self, addr, args):
@@ -1484,22 +1535,29 @@ def calibrate_faders(cfg):
 def calibrate(cfg):
     ser = connect(cfg)
     sync_setup(cfg, ser)
-    ser.send(">CAL")
-    print("Tap the three crosses on the touchscreen...")
-
-    def acc(line):
-        if line.startswith(">CALD "):
-            return [float(x) for x in line.split()[1:7]]
-        if line.startswith(">HELLO"):
-            ser.send(">CAL")
-        return None
-    cal = wait_event(ser, acc, timeout=120)
-    if cal:
-        cfg["touch_cal"] = cal
-        save_config(cfg)
-        save_to_mega(cfg, ser)
+    print("Looking for the touchscreen...")
+    for _ in range(8):  # its HELLO also tells the serial layer to use checksums
+        ser.send(">?")
+        if wait_line(ser, lambda l: l.startswith(">HELLO"), 2):
+            break
     else:
-        print("No calibration received.")
+        sys.exit("The touchscreen isn't answering. Is it showing 'waiting for computer'?")
+    for _ in range(6):
+        ser.send(">CAL")
+        if wait_line(ser, lambda l: l == ">CALSTART", 1.5):
+            break
+    else:
+        sys.exit("The touchscreen didn't start calibrating (old firmware? run --update-pi).")
+    print("Tap the three crosses on the touchscreen...")
+    line = wait_line(ser, lambda l: l.startswith(">CALD "), 120)
+    if not line:
+        sys.exit("No calibration received.")
+    cal = [float(x) for x in line.split()[1:7]]
+    cfg["touch_cal"] = cal
+    save_config(cfg)
+    ser.send(">K " + " ".join(str(x) for x in cal))  # tells the screen it's saved
+    save_to_mega(cfg, ser)
+    print("Saved.")
 
 
 def test_faders(cfg):
@@ -1580,27 +1638,6 @@ def monitor(cfg):
             sys.exit("Controller disconnected.")
 
 
-class Pacer:
-    """Keep a byte rate: the Mega relays at exactly the rate data arrives, so
-    full-speed bursts overflow its 64-byte buffer and drop bytes."""
-
-    def __init__(self, rate):
-        self.rate, self.free = rate, 0.0
-
-    def wait(self, nbytes):
-        now = time.time()
-        self.free = max(now, self.free) + nbytes / self.rate
-        if self.free - now > 0.02:
-            time.sleep(self.free - now - 0.02)
-
-
-def checksummed(line):
-    x = 0
-    for c in line.encode(errors="replace"):
-        x ^= c
-    return f"{line}*{x:02X}"
-
-
 def update_pi(cfg, path):
     """Send a littlelx-pi-update.zip to the touchscreen over USB."""
     try:
@@ -1652,14 +1689,10 @@ def update_pi(cfg, path):
         sys.exit("This touchscreen firmware is too old to update over USB; flash the SD card once instead.")
     print(f"Touchscreen firmware {old_ver} -> {new_ver}")
     proto = int(parts[2]) if parts[2].isdigit() else 2
-    # protocol 3+: checksummed lines and self-repairing chunks; older firmware
-    # fails on any damaged byte, so go slower and gentler with it
-    pacer = Pacer(20000 if proto >= 3 else 10000)
+    # protocol 3+: self-repairing chunks (lines are checksummed and paced by
+    # Port.send); older firmware fails on any damaged byte
 
     def send(line):
-        if proto >= 3:
-            line = checksummed(line)
-        pacer.wait(len(line) + 2)
         ser.send(">" + line)
 
     def wait_ack(timeout):

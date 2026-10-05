@@ -52,7 +52,7 @@
 #define NPINS 70
 #define DEBOUNCE_MS 4
 #define ANALOG_STEP 6     /* counts; the bridge sends whole % (~10 counts) */
-#define PI_BAUD 500000
+#define PI_BAUD 250000    /* exact on the AVR and the Pi; tolerant of so-so wiring */
 #define PISER Serial3
 #define PI_TX 14
 #define PI_RX 15
