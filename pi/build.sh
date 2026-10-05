@@ -80,6 +80,9 @@ for src in "$HERE"/overlays/*-overlay.dts; do   # our own overlays
 	"$K/scripts/dtc/dtc" -@ -q -I dts -O dtb -o "$S/overlays/$(basename "$src" -overlay.dts).dtbo" "$src"
 done
 cp "$K/arch/arm/boot/dts/overlays/overlay_map.dtb" "$S/overlays/" 2>/dev/null || true
+# The firmware only loads overlays from ${os_prefix}overlays/ if a README file
+# exists there; without it, it silently looks in /overlays/ (which we don't have).
+echo "littlelx: overlays for this OS slot (this file must exist)" > "$S/overlays/README"
 echo "$VERSION" > "$S/VERSION"
 
 echo "== update bundle"
