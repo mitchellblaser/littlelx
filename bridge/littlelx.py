@@ -44,6 +44,17 @@ except ImportError:
 
 CONFIG_PATH = os.path.expanduser("~/.littlelx.json")
 
+
+def bridge_version():
+    """git version of this checkout (or 'unknown', e.g. inside the .exe)."""
+    import subprocess
+    try:
+        here = os.path.dirname(os.path.abspath(__file__))
+        return subprocess.run(["git", "-C", here, "describe", "--always", "--dirty"],
+                              capture_output=True, text=True, timeout=3).stdout.strip() or "unknown"
+    except Exception:
+        return "unknown"
+
 # ---------------------------------------------------------------- defaults
 #
 # Key / touch-button actions:
@@ -295,7 +306,7 @@ def checksummed(line):
 
 
 PI_CK = re.compile(r"^>(.*)\*([0-9A-F]{2})$")
-PI_RATE = 12000   # bytes/s to the touchscreen: half of the 250k Mega<->Pi link
+PI_RATE = 16000   # bytes/s to the touchscreen: ~2/3 of the 250k Mega<->Pi link
 PI_PIECE = 32     # bytes per write, so the Mega's 64-byte buffers never fill
 
 
@@ -1638,6 +1649,10 @@ def monitor(cfg):
             sys.exit("Controller disconnected.")
 
 
+class UpdateFailed(Exception):
+    pass
+
+
 def update_pi(cfg, path):
     """Send a littlelx-pi-update.zip to the touchscreen over USB."""
     try:
@@ -1652,7 +1667,7 @@ def update_pi(cfg, path):
     if "zImage" not in names or "littlelx.cpio.gz" not in names:
         sys.exit(f"{path} doesn't look like a littlelx-pi-update.zip")
     new_ver = z.read("VERSION").decode().strip() if "VERSION" in names else "?"
-    total = sum(z.getinfo(n).file_size for n in names)
+    files = {n: z.read(n) for n in names}
 
     ser = connect(cfg)
 
@@ -1667,104 +1682,120 @@ def update_pi(cfg, path):
                 sys.exit("Controller disconnected during the update. The Pi still runs the old version; try again.")
             if kind == "mega" and src is ser:
                 if line.startswith(">UPD FAIL"):
-                    ser.send(">UPD ABORT")
-                    sys.exit("Touchscreen reported an error: " + line[10:] + " (nothing was changed)")
+                    raise UpdateFailed("touchscreen reported " + line[10:])
                 for p in prefixes:
                     if line.startswith(p):
                         return line
         return None
 
+    def hello():
+        for _ in range(8):
+            ser.send(">?")
+            h = wait([">HELLO"], 2)
+            if h:
+                return h
+        return None
+
     print("Looking for the touchscreen...")
-    hello = None
-    for _ in range(8):
-        ser.send(">?")
-        hello = wait([">HELLO"], 2)
-        if hello:
-            break
-    if not hello:
+    h = hello()
+    if not h:
         sys.exit("The touchscreen isn't answering. Is it powered and showing 'waiting for computer'?")
-    parts = hello.split()
+    parts = h.split()
     old_ver = parts[5] if len(parts) > 5 else "old"
     if len(parts) <= 5 or parts[2] == "1":
         sys.exit("This touchscreen firmware is too old to update over USB; flash the SD card once instead.")
-    print(f"Touchscreen firmware {old_ver} -> {new_ver}")
     proto = int(parts[2]) if parts[2].isdigit() else 2
-    # protocol 3+: self-repairing chunks (lines are checksummed and paced by
-    # Port.send); older firmware fails on any damaged byte
+    print(f"Touchscreen firmware {old_ver} -> {new_ver}")
+    rate = PI_RATE * 0.72  # payload rate after base64 and line overhead
 
     def send(line):
-        ser.send(">" + line)
+        ser.send(">" + line)  # Port.send checksums (protocol 3+) and paces
 
-    def wait_ack(timeout):
-        r = wait([">UPD ACK"], timeout)
-        return int(r.split()[2]) if r else None
+    def attempt():
+        total = sum(len(d) for d in files.values())
+        send(f"UPD BEGIN {total}")
+        if not wait([">UPD READY"], 20):
+            raise UpdateFailed("no answer to BEGIN")
+        CHUNK = 192
+        done = 0
+        for n, data in files.items():
+            send(f"UPD FILE {n} {len(data)} {zlib.crc32(data) & 0xffffffff:08x}")
+            r = wait([">UPD HAVE", ">UPD SEND"], 30)
+            if not r:
+                raise UpdateFailed(f"no answer for {n}")
+            if r.startswith(">UPD SEND"):
+                print(f"\r  sending {n} ({len(data) / 1024:.0f} KB, about {len(data) / rate:.0f} s)" + " " * 10)
+            for again in range(4):
+                if not r.startswith(">UPD SEND"):
+                    break
+                if again:
+                    print(f"\r  {n} arrived damaged, sending it again" + " " * 20)
+                if proto >= 3:
+                    # go-back-N: chunks carry their offset (and a CRC-32 on
+                    # protocol 4); the Pi acks how much it has and anything
+                    # lost or damaged is simply sent again
+                    pos = nxt = 0
+                    rewound, tries = False, 0
+                    while pos < len(data):
+                        while nxt < len(data) and nxt - pos < 4 * CHUNK:
+                            chunk = data[nxt:nxt + CHUNK]
+                            crc = f"{zlib.crc32(chunk) & 0xffffffff:08x} " if proto >= 4 else ""
+                            send(f"UPD DAT {nxt} {crc}" + base64.b64encode(chunk).decode())
+                            nxt = min(nxt + CHUNK, len(data))
+                        r2 = wait([">UPD ACK"], 2)
+                        a = int(r2.split()[2]) if r2 else None
+                        if a is None or (a == pos and not rewound):
+                            tries += 1
+                            if tries > 40:
+                                raise UpdateFailed("the link keeps failing")
+                            nxt, rewound = pos, True  # resend from what the Pi has
+                        elif a > pos:
+                            pos, rewound, tries = a, False, 0
+                            print(f"\r  {(done + pos) * 100 // total:3d}%  {n:<28}", end="", flush=True)
+                else:
+                    # older firmware: no repair possible, small window
+                    pos, inflight = 0, []
+                    while pos < len(data) or inflight:
+                        while pos < len(data) and len(inflight) < 2:
+                            chunk = data[pos:pos + CHUNK]
+                            send("UPD DATA " + base64.b64encode(chunk).decode())
+                            inflight.append(len(chunk))
+                            pos += len(chunk)
+                        if wait([">UPD ACK"], 15) is None:
+                            raise UpdateFailed("transfer stalled")
+                        inflight.pop(0)
+                        print(f"\r  {(done + pos - sum(inflight)) * 100 // total:3d}%  {n:<28}",
+                              end="", flush=True)
+                # the new firmware answers a file that failed its CRC with SEND again
+                r = wait([">UPD OK", ">UPD SEND"], 30)
+                if not r:
+                    raise UpdateFailed(f"{n} wasn't confirmed")
+            if r.startswith(">UPD SEND"):
+                raise UpdateFailed(f"{n} kept arriving damaged")
+            done += len(data)
+        print(f"\r  100%  {'all files sent':<28}")
+        send(f"UPD COMMIT {len(files)}")
+        if not wait([">UPD DONE"], 60):
+            raise UpdateFailed("the switch wasn't confirmed")
 
-    send(f"UPD BEGIN {total}")
-    r = wait([">UPD READY"], 20)
-    if not r:
-        sys.exit("No answer from the touchscreen (nothing was changed).")
-    done = 0
-    shown = [-1]
-    CHUNK = 192
-
-    def progress(n, nbytes):
-        pct = (done + nbytes) * 100 // total
-        if pct != shown[0]:
-            shown[0] = pct
-            print(f"\r  {pct:3d}%  {n:<28}", end="", flush=True)
-
-    for n in names:
-        data = z.read(n)
-        send(f"UPD FILE {n} {len(data)} {zlib.crc32(data) & 0xffffffff:08x}")
-        r = wait([">UPD HAVE", ">UPD SEND"], 30)
-        if not r:
-            sys.exit("Touchscreen stopped answering (nothing was changed).")
-        if r.startswith(">UPD SEND") and proto >= 3:
-            # go-back-N: chunks carry their offset; the Pi acks how much it
-            # has, and anything lost or damaged is simply sent again
-            pos = nxt = 0
-            rewound, tries = False, 0
-            while pos < len(data):
-                while nxt < len(data) and nxt - pos < 4 * CHUNK:
-                    send(f"UPD DAT {nxt} " + base64.b64encode(data[nxt:nxt + CHUNK]).decode())
-                    nxt = min(nxt + CHUNK, len(data))
-                a = wait_ack(2)
-                if a is None or (a == pos and not rewound):
-                    tries += 1
-                    if tries > 30:
-                        send("UPD ABORT")
-                        sys.exit("\nThe link keeps failing (nothing was changed). Check the Pi wiring.")
-                    nxt, rewound = pos, True  # resend from what the Pi has
-                elif a > pos:
-                    pos, rewound, tries = a, False, 0
-                    progress(n, pos)
-        elif r.startswith(">UPD SEND"):
-            # older Pi firmware: one damaged byte fails the update, so small
-            # window, slow pace
-            pos, inflight = 0, []
-            while pos < len(data) or inflight:
-                while pos < len(data) and len(inflight) < 2:
-                    chunk = data[pos:pos + CHUNK]
-                    send("UPD DATA " + base64.b64encode(chunk).decode())
-                    inflight.append(len(chunk))
-                    pos += len(chunk)
-                if wait_ack(15) is None:
-                    send("UPD ABORT")
-                    sys.exit("\nTransfer stalled (nothing was changed). Try again.")
-                inflight.pop(0)
-                progress(n, pos - sum(inflight))
-        if r.startswith(">UPD SEND") and not wait([">UPD OK"], 30):
-            sys.exit("\nFile wasn't confirmed (nothing was changed).")
-        done += len(data)
-        progress(n, 0)
-    print(f"\r  100%  {'all files sent':<28}")
-    send(f"UPD COMMIT {len(names)}")
-    if not wait([">UPD DONE"], 60):
-        sys.exit("The touchscreen didn't confirm the switch. It will keep running the old version.")
+    for tryno in range(1, 6):
+        try:
+            attempt()
+            break
+        except UpdateFailed as e:
+            send("UPD ABORT")
+            print(f"\n  Attempt {tryno} failed ({e}); nothing was changed.")
+            if tryno == 5:
+                sys.exit("Giving up after 5 attempts: the serial link to the Pi is too unreliable. "
+                         "Check the wiring, or flash the SD card instead.")
+            print("  Trying again...")
+            time.sleep(2)
+            if not hello():
+                sys.exit("The touchscreen stopped answering.")
     print("Installed. The touchscreen is restarting...")
     end = time.time() + 90
     while time.time() < end:
-        ser.send(">?")  # the new firmware decides its own protocol
+        ser.send(">?")
         h = wait([">HELLO"], 3)
         if h:
             v = h.split()[5] if len(h.split()) > 5 else "?"
@@ -1785,6 +1816,7 @@ def main():
     ap.add_argument("--port", help="serial port (default: auto-detect)")
     ap.add_argument("--update-pi", metavar="ZIP", help="update the touchscreen firmware")
     args = ap.parse_args()
+    print(f"littlelx bridge {bridge_version()}")
     cfg = load_config()
     if args.port:
         cfg["serial_port"] = args.port

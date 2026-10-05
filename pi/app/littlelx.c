@@ -33,7 +33,7 @@
  *     UPD ...                             firmware update, see "update" below
  *
  *   panel -> computer
- *     HELLO littlelx-pi 3 <w> <h> <version>   (3 = protocol version)
+ *     HELLO littlelx-pi 4 <w> <h> <version>   (4 = protocol version)
  *     INFO fb=<ok|missing> touch=<ok|missing>   (right after each HELLO)
  *     STAT lines=<n> bad=<n> frame=<n> overrun=<n> lost=<n>
  *                                         link quality, every 10 s while online
@@ -134,6 +134,7 @@ static struct {
 	char path[160];
 	long size, got;
 	uint32_t want, crc;
+	int dat_mode; /* self-repairing transfer in use */
 	long long last_rx;
 	int pct;
 } upd = { .fd = -1 };
@@ -396,14 +397,16 @@ static void paint_region(void)
 		return;
 	}
 	if (upd.active) {
-		char msg[64];
-		int bw = W - 60, fillw = bw * (upd.pct < 0 ? 0 : upd.pct) / 100;
+		char pct[16];
+		int p = upd.pct < 0 ? 0 : upd.pct;
+		int bw = W - 40, fillw = bw * p / 100;
+		snprintf(pct, sizeof(pct), "%d%%", p);
 		fill(0, 0, W, H, 0x101418);
-		draw_text_box(0, H / 2 - 60, W, 30, 1, 0, 0xffffff, "Updating firmware");
-		fill(30, H / 2 - 12, bw, 24, 0x2a3340);
-		fill(30, H / 2 - 12, fillw, 24, 0x2f7de1);
-		snprintf(msg, sizeof(msg), "%d%%   (unplugging now keeps the old version)", upd.pct < 0 ? 0 : upd.pct);
-		draw_text_box(0, H / 2 + 20, W, 24, 0, 0, 0x8899aa, msg);
+		draw_text_box(0, H / 2 - 90, W, 30, 1, 0, 0xffffff, "Updating firmware");
+		draw_text_box(0, H / 2 - 52, W, 36, 2, 0, 0xffffff, pct);
+		fill(20, H / 2 - 6, bw, 20, 0x2a3340);
+		fill(20, H / 2 - 6, fillw, 20, 0x2f7de1);
+		draw_text_box(0, H / 2 + 26, W, 40, 0, 0, 0x8899aa, "Safe to unplug:\nthe old version stays");
 		return;
 	}
 	if (!online) {
@@ -517,10 +520,13 @@ static void set_online(int on)
  *   UPD FILE <path> <size> <crc>  -> UPD HAVE <path> (copied from the running
  *                                    slot, identical) or UPD SEND <path>
  *   UPD DATA <base64>             -> UPD ACK <bytes so far>, then UPD OK <path>
- *   UPD DAT <offset> <base64>     same, but self-repairing: a chunk that isn't
- *                                 at <offset> == bytes so far, or doesn't
- *                                 decode, is ignored and answered with
- *                                 UPD ACK <bytes so far> so the bridge resends
+ *   UPD DAT <offset> <crc32> <base64>
+ *                                 same, but self-repairing: a chunk that isn't
+ *                                 at <offset> == bytes so far, doesn't decode or
+ *                                 doesn't match its CRC-32 is ignored and
+ *                                 answered with UPD ACK <bytes so far> so the
+ *                                 bridge resends. A file whose overall CRC still
+ *                                 fails is asked for again (UPD SEND <path>).
  *   UPD COMMIT <files>            switch slots, reboot         -> UPD DONE
  *   UPD ABORT                     give up, nothing changes     -> UPD ABORTED
  *   errors: UPD FAIL <reason>
@@ -694,6 +700,18 @@ static void upd_finish_file(void)
 	slot_path(dst, sizeof(dst), upd.spare, upd.path);
 	snprintf(part, sizeof(part), "%s.part", dst);
 	if (upd.crc != upd.want) {
+		if (upd.dat_mode) { /* ask for the whole file again */
+			upd.done -= upd.got;
+			upd.got = 0;
+			upd.crc = 0;
+			upd.fd = open(part, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+			if (upd.fd < 0) {
+				upd_fail("cannot-create-file");
+				return;
+			}
+			send_line("UPD SEND %s", upd.path);
+			return;
+		}
 		upd_fail("checksum-mismatch");
 		return;
 	}
@@ -780,8 +798,9 @@ static void upd_file(const char *rel, long size, uint32_t want)
 }
 
 /* offset < 0: old-style DATA, any damage fails the update.
- * offset >= 0: DAT, out-of-place or damaged chunks just ask for a resend. */
-static void upd_data(const char *b64, long offset)
+ * offset >= 0: DAT, out-of-place or damaged chunks just ask for a resend
+ * (chunk_crc, when given, must match the decoded bytes). */
+static void upd_data(const char *b64, long offset, int has_crc, uint32_t chunk_crc)
 {
 	uint8_t buf[256];
 	if (!upd.active || upd.fd < 0) {
@@ -794,6 +813,8 @@ static void upd_data(const char *b64, long offset)
 		return;
 	}
 	int n = strlen(b64) <= 340 ? b64_decode(b64, buf) : -1;
+	if (n >= 0 && has_crc && crc32_update(0, buf, n) != chunk_crc)
+		n = -1;
 	if (n < 0 || upd.got + n > upd.size) {
 		if (offset >= 0)
 			send_line("UPD ACK %ld", upd.got);
@@ -858,13 +879,17 @@ static void upd_line(char *args)
 		(void)rest;
 		upd_file(f[0], atol(f[1]), (uint32_t)strtoul(f[2], NULL, 16));
 	} else if (!strncmp(args, "DATA ", 5)) {
-		upd_data(args + 5, -1);
+		upd_data(args + 5, -1, 0, 0);
 	} else if (!strncmp(args, "DAT ", 4)) {
-		char *sp;
-		long off = strtol(args + 4, &sp, 10);
-		if (*sp == ' ')
-			sp++;
-		upd_data(sp, off < 0 ? 0 : off);
+		/* DAT <offset> <crc32> <b64>  (older bridges: DAT <offset> <b64>) */
+		char *f[3];
+		char *rest = fields(args + 4, f, 2);
+		long off = strtol(f[0], NULL, 10);
+		upd.dat_mode = 1;
+		if (*rest)
+			upd_data(rest, off < 0 ? 0 : off, 1, (uint32_t)strtoul(f[1], NULL, 16));
+		else
+			upd_data(f[1], off < 0 ? 0 : off, 0, 0);
 	} else if (!strncmp(args, "COMMIT", 6)) {
 		upd_commit(atoi(args + 6));
 	} else if (!strncmp(args, "ABORT", 5)) {
@@ -1377,7 +1402,7 @@ static int app(void)
 
 static void send_hello(void)
 {
-	send_line("HELLO littlelx-pi 3 %d %d %s", W, H, LLX_VERSION);
+	send_line("HELLO littlelx-pi 4 %d %d %s", W, H, LLX_VERSION);
 	send_line("INFO fb=%s touch=%s baud=%d", fbmem ? "ok" : "missing", touch >= 0 ? "ok" : "missing",
 		  bauds[baud_i]);
 }
