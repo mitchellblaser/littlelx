@@ -847,9 +847,10 @@ def learn(cfg):
                     seen.setdefault(ch, []).append(v)
             return None
         wait_event(ser, acc)
+        # a real fader travels (nearly) end to end; noise and crosstalk don't
         best = max(seen.items(), key=lambda kv: max(kv[1]) - min(kv[1]), default=None)
-        if not best or max(best[1]) - min(best[1]) < 300:
-            print("  no fader movement seen, skipped")
+        if not best or max(best[1]) - min(best[1]) < 600:
+            print("  no full fader movement seen (bottom to top), skipped")
             hw["faders"][i] = None
             continue
         ch, vals = best

@@ -199,8 +199,13 @@ static void scan_digital()
 	}
 }
 
-/* Non-blocking ADC: one conversion per call; two per channel (first one
- * after switching the mux is thrown away). */
+/* Non-blocking ADC, two conversions per channel:
+ *   pass 0: convert the internal 0 V channel. This empties the ADC's sample
+ *           capacitor, so an unconnected (floating) pin is pulled to 0 and
+ *           stays quiet instead of wandering / copying the previous channel.
+ *   pass 1: convert the real pin. A fader (low impedance) recharges the
+ *           sample capacitor to its true value in well under the sample time.
+ */
 static void scan_analog()
 {
 	if (adc_busy) {
@@ -215,9 +220,9 @@ static void scan_analog()
 			int16_t out = (f + 8) >> 4;
 			if (out > 1023)
 				out = 1023;
-			if (out <= 2)
+			if (out <= 8)
 				out = 0;
-			if (out >= 1021)
+			if (out >= 1015)
 				out = 1023;
 			int16_t d = out - asent[ach];
 			if (d >= ANALOG_STEP || d <= -ANALOG_STEP ||
@@ -238,10 +243,16 @@ static void scan_analog()
 	}
 	if ((mode[54 + ach] & 7) != M_ANALOG) {
 		ach = (ach + 1) & 15;
+		adc_pass = 0;
 		return;
 	}
-	ADMUX = _BV(REFS0) | (ach & 7);
-	ADCSRB = (ach & 8) ? _BV(MUX5) : 0;
+	if (adc_pass == 0) {
+		ADCSRB = 0;
+		ADMUX = _BV(REFS0) | 0x1f; /* MUX5:0 = 011111: 0 V (GND) */
+	} else {
+		ADCSRB = (ach & 8) ? _BV(MUX5) : 0;
+		ADMUX = _BV(REFS0) | (ach & 7);
+	}
 	ADCSRA |= _BV(ADSC);
 	adc_busy = 1;
 }
