@@ -28,7 +28,7 @@
 
 #define NPINS 70
 #define DEBOUNCE_MS 4
-#define ANALOG_STEP 4
+#define ANALOG_STEP 6     /* counts; the bridge sends whole % (~10 counts) */
 #define PI_BAUD 500000
 #define PISER Serial3
 #define PI_TX 14
@@ -220,9 +220,9 @@ static void scan_analog()
 			int16_t out = (f + 8) >> 4;
 			if (out > 1023)
 				out = 1023;
-			if (out <= 8)
+			if (out <= 24)  /* floating pins settle ~10-20: treat as 0 */
 				out = 0;
-			if (out >= 1015)
+			if (out >= 1000) /* ~2% at each end so faders hit clean 0/100% */
 				out = 1023;
 			int16_t d = out - asent[ach];
 			if (d >= ANALOG_STEP || d <= -ANALOG_STEP ||
