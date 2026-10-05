@@ -91,6 +91,7 @@ DEFAULTS = {
         "tick": 0.1,              # how often MA reports (s)
     },
     "serial_port": "",            # "" = auto-detect, or e.g. "COM5" / "/dev/cu.usbmodem1101"
+    "screen_bgr": True,           # panel takes blue-green-red: swap (false if red/blue look swapped)
     "page": 1,
     "pickup": True,               # soft takeover: a fader acts once it reaches MA's level
     "faders": [{"exec": 201 + i, "name": ""} for i in range(5)],
@@ -640,6 +641,25 @@ def esc(text):
     return str(text).replace("\n", "\\n")
 
 
+def bgr(color):
+    """'rrggbb' -> 'bbggrr'."""
+    return color[4:6] + color[2:4] + color[:2] if len(color) == 6 else color
+
+
+def bgr_line(line):
+    """Swap red and blue in a screen command's colours: these panels take BGR."""
+    p = line.split(" ")
+    if p[0] == "W" and len(p) > 10:      # W id kind x y w h bg fg ac ...
+        p[7:10] = [bgr(c) for c in p[7:10]]
+    elif p[0] == "C" and len(p) >= 5:    # C id bg fg ac
+        p[2:5] = [bgr(c) for c in p[2:5]]
+    elif p[0] == "BG" and len(p) == 2:
+        p[1] = bgr(p[1])
+    else:
+        return line
+    return " ".join(p)
+
+
 def shade(color, f):
     """'rrggbb' scaled towards black (f < 1)."""
     try:
@@ -706,6 +726,8 @@ class Screen:
         return self.h > self.w
 
     def send(self, line):
+        if self.b.cfg.get("screen_bgr", True):
+            line = bgr_line(line)
         self.b.to_pi(line)
 
     # ---- widget state
@@ -1971,14 +1993,17 @@ def calibrate_faders(cfg):
     NEXT = 1
     find_screen(ser)
 
+    def send(line):  # screen colours, swapped for BGR panels like the bridge's
+        ser.send(">" + bgr_line(line[1:]) if cfg.get("screen_bgr", True) else line)
+
     def screen(title, button):
-        ser.send(">CLR")
-        ser.send(">BG 101418")
-        ser.send(f">W 0 L 0 0 320 70 1c2430 ffffff 1c2430 1 0 0 {esc(title)}")
+        send(">CLR")
+        send(">BG 101418")
+        send(f">W 0 L 0 0 320 70 1c2430 ffffff 1c2430 1 0 0 {esc(title)}")
         for n, (i, f) in enumerate(faders):
-            ser.send(f">W {10 + n} V {6 + n * 63} 80 57 300 232b38 ffffff 2f7de1 0 0 0 F{i + 1}")
+            send(f">W {10 + n} V {6 + n * 63} 80 57 300 232b38 ffffff 2f7de1 0 0 0 F{i + 1}")
         if button:
-            ser.send(f">W {NEXT} B 60 396 200 70 c08a1e ffffff c08a1e 1 0 0 {button}")
+            send(f">W {NEXT} B 60 396 200 70 c08a1e ffffff c08a1e 1 0 0 {button}")
 
     def step(title):
         print(title.replace("\\n", " ") + ", then press Enter here or tap Next on the screen.")
