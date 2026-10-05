@@ -11,6 +11,7 @@ This script turns faders/keys/encoders into OSC for MA3 and draws the screen.
   littlelx.py --faders      calibrate fader bottom/top (after --learn)
   littlelx.py --monitor     print everything the Mega sends
   littlelx.py --probe       show how key-matrix pins connect (hold a key)
+  littlelx.py --test-faders find the fader message format your MA3 accepts
   littlelx.py --update-pi littlelx-pi-update.zip
                             update the touchscreen's firmware over USB
   littlelx.py --port COM5   use a specific serial port
@@ -58,7 +59,7 @@ DEFAULTS = {
         "port": 8000,             # MA3: Menu > In & Out > OSC > Port
         "prefix": "/gma3",        # MA3 OSC line "Prefix" (gma3), "" if none
         "listen_port": 9000,      # MA3 "Send" destination port, for feedback
-        "fader_type": "i",        # "i" (0..100 int) or "f" (0..100 float)
+        "fader_type": "i",        # how faders are sent; --test-faders picks it (see FADER_FORMATS)
     },
     "serial_port": "",            # "" = auto-detect, or e.g. "COM5" / "/dev/cu.usbmodem1101"
     "page": 1,
@@ -173,6 +174,30 @@ def osc_parse(data):
         yield addr, args
     except (ValueError, struct.error):
         return
+
+
+# How a fader move is sent to MA3. MA3 versions/setups differ, so
+# --test-faders tries each on a real executor and stores the one that works.
+FADER_FORMATS = {
+    "i":     "OSC /PageN/FaderE  int 0..100",
+    "f":     "OSC /PageN/FaderE  float 0..100",
+    "f1":    "OSC /PageN/FaderE  float 0..1",
+    "cmd":   "command  Page N.E At V",
+    "cmdex": "command  Executor N.E At V",
+}
+
+
+def fader_message(fmt, page, ex, value):
+    """-> (address, arg) for Bridge.osc(); value is 0..100."""
+    if fmt == "f":
+        return f"/Page{page}/Fader{ex}", float(round(value, 1))
+    if fmt == "f1":
+        return f"/Page{page}/Fader{ex}", float(round(value / 100.0, 4))
+    if fmt == "cmd":
+        return "/cmd", f"Page {page}.{ex} At {round(value)}"
+    if fmt == "cmdex":
+        return "/cmd", f"Executor {page}.{ex} At {round(value)}"
+    return f"/Page{page}/Fader{ex}", int(round(value))
 
 
 # ------------------------------------------------------------------ events
@@ -641,6 +666,9 @@ class Bridge:
         self.fader_pos = [None] * 5          # physical position 0..100
         self.fader_sent = [None] * 5
         self.pickup_pending = [None] * 5     # MA value we wait to cross
+        self.fader_cmd_at = [0.0] * 5
+        self.fader_cmd_pending = [None] * 5
+        self.verbose = False
         self.ma_values = {}                  # (page, exec) -> 0..100
         self.ma_names = {}
         self.ma_seen = 0
@@ -717,9 +745,23 @@ class Bridge:
                 pass  # reader thread reports the disconnect
 
     def send_fader(self, i, value):
-        ex = self.cfg["faders"][i]["exec"]
-        v = round(value) if self.cfg["osc"]["fader_type"] == "i" else float(round(value, 1))
-        self.osc(f"/Page{self.page}/Fader{ex}", v)
+        fmt = self.cfg["osc"].get("fader_type", "i")
+        if fmt.startswith("cmd"):  # command line: max ~25/s per fader, last value always sent
+            now = time.time()
+            if now - self.fader_cmd_at[i] < 0.04:
+                self.fader_cmd_pending[i] = value
+                return
+            self.fader_cmd_at[i] = now
+            self.fader_cmd_pending[i] = None
+        addr, arg = fader_message(fmt, self.page, self.cfg["faders"][i]["exec"], value)
+        self.osc(addr, arg)
+        if self.verbose:
+            print(f"fader {i + 1}: {round(value)}%  ->  {addr} {arg}")
+
+    def flush_faders(self):
+        for i, v in enumerate(self.fader_cmd_pending):
+            if v is not None and time.time() - self.fader_cmd_at[i] >= 0.04:
+                self.send_fader(i, v)
 
     def do_action(self, act, down):
         if "exec" in act:
@@ -921,6 +963,7 @@ class Bridge:
                     time.sleep(1)
                     break
                 now = time.time()
+                self.flush_faders()
                 if now - last_ping > 1:
                     last_ping = now
                     self.to_pi("PING")
@@ -1178,6 +1221,34 @@ def calibrate(cfg):
         print("No calibration received.")
 
 
+def test_faders(cfg):
+    """Try each fader message format on a real executor; keep the one that moves it."""
+    o = cfg["osc"]
+    page, ex = cfg.get("page", 1), cfg["faders"][0]["exec"]
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    prefix = o["prefix"].rstrip("/")
+
+    def send(fmt, v):
+        addr, arg = fader_message(fmt, page, ex, v)
+        sock.sendto(osc_message(prefix + addr, arg), (o["host"], int(o["port"])))
+
+    print(f"Testing fader formats on Page {page}, executor {ex} (MA3 at {o['host']}:{o['port']}).")
+    print(f"Make sure executor {ex} on page {page} has something on it (e.g. a sequence),")
+    print("and watch its fader in MA3. Each test moves it up to 100 %, then back down.\n")
+    for fmt, desc in FADER_FORMATS.items():
+        input(f"[{fmt}] {desc} - press Enter to try it... ")
+        for v in list(range(0, 101, 10)) + list(range(100, -1, -10)):
+            send(fmt, v)
+            time.sleep(0.08)
+        if input("    Did the fader move? [y/N] ").strip().lower().startswith("y"):
+            cfg["osc"]["fader_type"] = fmt
+            save_config(cfg)
+            print(f"\nSaved: faders will use '{fmt}'. Restart the bridge.")
+            return
+    print("\nNone of them moved it. Check that executor", ex, "has a sequence on page", page,
+          "and that the OSC line in MA3 has Receive = Yes (commands working means it does).")
+
+
 def probe(cfg):
     """Show, live, which pins connect when keys are held (wiring diagnostics)."""
     ser = connect(cfg)
@@ -1335,6 +1406,8 @@ def main():
     ap.add_argument("--faders", action="store_true", help="calibrate fader bottom/top")
     ap.add_argument("--monitor", action="store_true", help="print raw events")
     ap.add_argument("--probe", action="store_true", help="key-matrix wiring diagnostics")
+    ap.add_argument("--test-faders", action="store_true", help="find the fader format MA3 accepts")
+    ap.add_argument("--verbose", action="store_true", help="print every fader message sent")
     ap.add_argument("--port", help="serial port (default: auto-detect)")
     ap.add_argument("--update-pi", metavar="ZIP", help="update the touchscreen firmware")
     args = ap.parse_args()
@@ -1358,9 +1431,13 @@ def main():
             monitor(cfg)
         elif args.probe:
             probe(cfg)
+        elif args.test_faders:
+            test_faders(cfg)
         else:
             print(f"Sending OSC to {cfg['osc']['host']}:{cfg['osc']['port']} prefix '{cfg['osc']['prefix']}'")
-            Bridge(cfg).run()
+            b = Bridge(cfg)
+            b.verbose = args.verbose
+            b.run()
     except KeyboardInterrupt:
         print()
 

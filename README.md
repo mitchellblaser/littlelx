@@ -218,6 +218,11 @@ Actions are one of `{"exec": 201}`, `{"cmd": "Go+"}`, `{"page": 1}` or
 for soft takeover when MA3 reports fader values (useful when paging). Set
 `"fader_type": "f"` if your MA3 version wants float fader values.
 
+**Faders not moving in MA3?** MA3 versions differ in the fader message they
+accept. Run `littlelx.py --test-faders`: it moves executor 201 using each known
+format in turn, asks you which one worked, and remembers it. To see every
+fader message the bridge sends, run it with `--verbose`.
+
 `littlelx.py --monitor` prints every raw event from the Mega and the Pi.
 
 ## Building the Pi image yourself
