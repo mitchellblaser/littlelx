@@ -238,7 +238,7 @@ letter.
 | Keys 18 / 19 / 20 | Clear / Go+ / Oops |
 | Encoder 1 | Dimmer ± 1 per click (± 0.1 when MA's Dimmer encoder resolution is Fine); push = toggle Coarse/Fine in MA |
 | Encoder 2 | Page −/+; push = Keypad screen |
-| Touchscreen | MA fader levels + physical position, names; Page −/+, Clear, Oops, Keypad, Go −, Pause, Go +, Highlight, Blind, Last, Next; a full command keypad |
+| Touchscreen | Main page: the 5 faders in their MA sequence colours (MA level + physical position, names); Page −/+, Clear, Highlight, Last, Next, Blind, Keypad, Encoders. Keypad page: a full command keypad. Encoders page: what each encoder controls and its Coarse/Fine (tap to toggle), Change to pick another attribute or Page |
 
 Actions are one of `{"exec": 201}`, `{"key": "Store"}` (a console key typed into
 MA's command line; `"Please"`, `"Clear"` and `"<-"` act on the line), `{"cmd": "Go+"}`

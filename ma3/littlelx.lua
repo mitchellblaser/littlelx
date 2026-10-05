@@ -97,6 +97,40 @@ local function toggle_resolution(attr)
 		profile, attr, nextres))
 end
 
+-- The sequence's colour (its Appearance) as "rrggbb", "" if it has none.
+-- MA versions differ in how it is stored, so try the known forms.
+local function hex3(r, g, b)
+	r, g, b = num(r), num(g), num(b)
+	if not (r and g and b) then return nil end
+	if r <= 1 and g <= 1 and b <= 1 then r, g, b = r * 255, g * 255, b * 255 end
+	local function c(v) return math.max(0, math.min(255, math.floor(v + 0.5))) end
+	return string.format("%02x%02x%02x", c(r), c(g), c(b))
+end
+local function rgb_string(v) -- "r,g,b[,a]" or "#rrggbb"
+	if type(v) ~= "string" then return nil end
+	local h = v:match("^#?(%x%x%x%x%x%x)$")
+	if h then return h:lower() end
+	local r, g, b = v:match("([%d%.]+)%s*[,; ]%s*([%d%.]+)%s*[,; ]%s*([%d%.]+)")
+	return r and hex3(r, g, b)
+end
+local function seq_color(obj)
+	if not obj then return "" end
+	local ok, c = pcall(function()
+		local ap = obj.Appearance
+		if ap and type(ap) ~= "string" then
+			local alpha = num(ap.BackAlpha)
+			if alpha == nil or alpha > 0 then
+				local h = hex3(ap.BackR, ap.BackG, ap.BackB)
+				if h then return h end
+			end
+			local h = rgb_string(ap.Color) or rgb_string(ap.BackColor)
+			if h then return h end
+		end
+		return rgb_string(obj.Color)
+	end)
+	return ok and c or ""
+end
+
 local function watched(no)
 	for _, n in ipairs(WATCH) do
 		if n == no then return true end
@@ -124,6 +158,8 @@ local function report(force)
 			if changed("f" .. no, math.floor(fader * 10 + 0.5)) then send("fader/" .. no, "f", fader) end
 			if changed("r" .. no, running) then send("run/" .. no, "i", running) end
 			if changed("n" .. no, name) then send("name/" .. no, "s", name) end
+			local color = seq_color(obj)
+			if changed("c" .. no, color) then send("color/" .. no, "s", color) end
 		end
 	end
 	for _, no in ipairs(WATCH) do -- executors that became empty
@@ -131,6 +167,8 @@ local function report(force)
 			send("fader/" .. no, "f", 0)
 			send("run/" .. no, "i", 0)
 			send("name/" .. no, "s", "")
+			send("color/" .. no, "s", "")
+			last["c" .. no] = ""
 		end
 	end
 	for _, m in ipairs(MASTERS) do

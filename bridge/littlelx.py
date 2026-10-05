@@ -72,7 +72,7 @@ def bridge_version():
 #   {"cmd": "... {d} ..."}               {d} = step per click, or {"page": 1}
 # Push actions also allow {"resolution": "Dimmer"}: toggle MA's Coarse/Fine.
 
-CONFIG_VERSION = 4
+CONFIG_VERSION = 5
 
 DEFAULTS = {
     "config_version": CONFIG_VERSION,
@@ -106,16 +106,16 @@ DEFAULTS = {
         {"label": "Page -", "page": -1},
         {"label": "Page +", "page": 1},
         {"label": "Clear", "key": "Clear"},
-        {"label": "Oops", "cmd": "Oops"},
-        {"label": "Keypad", "screen": "keypad"},
-        {"label": "Go -", "cmd": "Go-"},
-        {"label": "Pause", "cmd": "Pause"},
-        {"label": "Go +", "cmd": "Go+", "color": "1f7a3a"},
         {"label": "Highlight", "cmd": "Highlight", "state": "highlight"},
-        {"label": "Blind", "cmd": "Blind", "state": "blind"},
         {"label": "Last", "cmd": "Previous"},
         {"label": "Next", "cmd": "Next"},
+        {"label": "Blind", "cmd": "Blind", "state": "blind"},
+        {"label": "Keypad", "screen": "keypad"},
+        {"label": "Encoders", "screen": "encoders"},
     ],
+    # Choices on the touchscreen's Encoders page (MA3 attribute names)
+    "encoder_attributes": ["Dimmer", "Pan", "Tilt", "Zoom", "Focus1", "Iris",
+                           "Shutter1", "Gobo1", "Color1", "Prism1", "Frost1"],
     # Filled in by --learn
     "hw": {
         "faders": [None] * 5,      # {"ch": 0..15, "lo": 0, "hi": 1023}
@@ -150,9 +150,13 @@ def load_config():
 def migrate(cfg):
     """Bring a config saved by an older version up to date (runs once)."""
     labels = [b.get("label") for b in cfg.get("touch_buttons", [])]
-    if "Blackout" in labels or "Freeze" in labels:
+    old_defaults = (["Page -", "Page +", "Clear", "Oops", "Keypad", "Go -", "Pause", "Go +",
+                     "Highlight", "Blind", "Last", "Next"],
+                    ["Page -", "Page +", "Clear", "Oops", "Keypad", "Go -", "Pause", "Go +",
+                     "Highlight", "Blind", "Blackout", "Freeze"])
+    if "Blackout" in labels or "Freeze" in labels or labels in old_defaults:
         cfg["touch_buttons"] = copy.deepcopy(DEFAULTS["touch_buttons"])
-        print("Touch buttons updated: Blackout/Freeze replaced by Last/Next; Highlight/Blind light up.")
+        print("Touch buttons updated: Page -/+, Clear, Highlight, Last, Next, Blind, Keypad, Encoders.")
     for k in cfg.get("keys", []):
         if k == {"cmd": "Clear"}:  # Clear now acts on MA's command line first
             k.pop("cmd")
@@ -629,6 +633,18 @@ def esc(text):
     return str(text).replace("\n", "\\n")
 
 
+def shade(color, f):
+    """'rrggbb' scaled towards black (f < 1)."""
+    try:
+        v = int(color, 16)
+    except (TypeError, ValueError):
+        return None
+    return "".join(f"{min(255, int(((v >> sh) & 255) * f)):02x}" for sh in (16, 8, 0))
+
+
+RES_LABELS = ((0.5, "Coarse"), (0.05, "Fine"), (0, "Ultra"))  # MA's step factor -> name
+
+
 class Screen:
     """Builds the touchscreen pages out of Pi widgets. Adapts to portrait or
     landscape using the size the panel reports in its HELLO.
@@ -641,6 +657,10 @@ class Screen:
     BTN0 = 20
     CMDLINE = 39
     KEY0 = 40
+    ENC0 = 66      # encoders page: 10 ids per encoder
+    PICK_TITLE = 89
+    PICK0 = 90     # attribute choices
+    BACK = 120
 
     KEYPAD = [
         ["Fixture", "7", "8", "9", "Thru"],
@@ -760,6 +780,10 @@ class Screen:
         self.header()
         if self.name == "keypad":
             self.draw_keypad()
+        elif self.name == "encoders":
+            self.draw_encoders()
+        elif self.name.startswith("pick"):
+            self.draw_picker(int(self.name[4:]))
         else:
             self.draw_main()
 
@@ -773,8 +797,8 @@ class Screen:
                         0, 0, 0, "")
             self.update_fader(i)
         cols = 3 if self.portrait else 5
-        rows = 4 if self.portrait else 2
-        btns = self.b.cfg["touch_buttons"][:cols * rows]
+        btns = self.b.cfg["touch_buttons"][:cols * 4]
+        rows = max(1, -(-len(btns) // cols))
         by = top + fh + 6
         bw = (w - 4) // cols
         bh = (h - by - 2) // rows
@@ -804,6 +828,100 @@ class Screen:
                 font = 0 if self.portrait and len(label) > 3 else 1
                 self.widget(wid, "B", 4 + c * bw, ky + r * bh, bw - 3, bh - 4, color, C_TEXT, C_BTN_ON,
                             font, 0, 0, label)
+
+    def back_button(self):
+        self.keymap[self.BACK] = {"back": True}
+        self.widget(self.BACK, "B", 4, self.h - 58, self.w - 8, 54, C_KEY2, C_TEXT, C_BTN_ON, 1, 0, 0, "Back")
+
+    def encoder_info(self, i):
+        """-> (what it controls, resolution label or None if it has none)."""
+        encs = self.b.cfg["encoders"]
+        act = encs[i] if i < len(encs) and encs[i] else {}
+        if "attribute" in act:
+            attr = act["attribute"]
+            if not self.b.ma_linked():
+                return attr, "No MA link"
+            f = self.b.ma["res"].get(attr, 1.0)  # not reported yet: MA's default
+            return attr, next(name for lim, name in RES_LABELS if f >= lim)
+        if "page" in act:
+            return "Page", None
+        if "cmd" in act:
+            return act["cmd"].replace("{d}", "n"), None
+        return "-", None
+
+    def draw_encoders(self):
+        """The two encoders, stacked like the hardware: what each one controls,
+        its resolution (tap to toggle) and Change."""
+        w = self.w
+        top = self.header_h() + 4
+        ph = (self.h - 62 - top) // 2
+        self.keymap = {}
+        hw = self.b.cfg["hw"]["encoders"]
+        for i in range(2):
+            y, base = top + i * ph, self.ENC0 + i * 10
+            title = f"Encoder {i + 1}" + ("" if i < len(hw) and hw[i] else "  (not learnt)")
+            self.widget(base, "L", 4, y, w - 8, ph - 6, C_PANEL, C_DIM, C_PANEL, 0, 1, 0, "")
+            self.widget(base + 4, "L", 10, y + 4, w - 20, 18, C_PANEL, C_DIM, C_PANEL, 0, 1, 0, title)
+            self.widget(base + 1, "L", 8, y + 22, w - 16, ph // 2 - 22, C_PANEL, C_TEXT, C_PANEL, 2, 0, 0, "")
+            by, bh = y + ph // 2 + 2, ph - ph // 2 - 14
+            bw = (w - 20) // 2
+            self.widget(base + 2, "B", 8, by, bw, bh, C_BTN, C_TEXT, C_BTN_ON, 1, 0, 0, "")
+            self.keymap[base + 3] = {"pick": i}
+            self.widget(base + 3, "B", 12 + bw, by, bw, bh, C_KEY2, C_TEXT, C_BTN_ON, 1, 0, 0, "Change")
+        self.back_button()
+        self.update_encoders()
+
+    def update_encoders(self):
+        if self.name != "encoders":
+            return
+        for i in range(2):
+            base = self.ENC0 + i * 10
+            what, res = self.encoder_info(i)
+            self.setw(base + 1, text=what)
+            if res is None:
+                self.keymap.pop(base + 2, None)
+                self.setw(base + 2, value=0, text="-", colors=(C_PANEL, C_DIM, C_PANEL))
+            else:
+                act = self.b.cfg["encoders"][i]
+                self.keymap[base + 2] = {"resolution": act["attribute"]}
+                self.setw(base + 2, value=1 if res in ("Fine", "Ultra") else 0, text=res,
+                          colors=(C_BTN, C_TEXT, C_BTN_ON))
+
+    def draw_picker(self, i):
+        w = self.w
+        top = self.header_h() + 4
+        self.keymap = {}
+        self.widget(self.PICK_TITLE, "L", 4, top, w - 8, 30, C_PANEL, C_TEXT, C_PANEL, 1, 0, 0,
+                    f"Encoder {i + 1} controls:")
+        choices = list(self.b.cfg.get("encoder_attributes", []))[:24] + ["Page"]
+        current, _ = self.encoder_info(i)
+        cols = 3
+        rows = -(-len(choices) // cols)
+        gy = top + 36
+        bw, bh = (w - 4) // cols, min(64, (self.h - 62 - gy) // rows)
+        for n, name in enumerate(choices):
+            r, c = divmod(n, cols)
+            wid = self.PICK0 + n
+            self.keymap[wid] = {"pick": i, "choice": name}
+            self.widget(wid, "B", 4 + c * bw, gy + r * bh, bw - 3, bh - 4, C_BTN, C_TEXT, C_BTN_ON,
+                        0 if len(name) > 7 else 1, 0, 1 if name == current else 0, name)
+        self.back_button()
+
+    def assign_encoder(self, i, choice):
+        encs = self.b.cfg["encoders"]
+        while len(encs) <= i:
+            encs.append({})
+        old = encs[i] or {}
+        if choice == "Page":
+            push = old.get("push")
+            if not push or "resolution" in push:
+                push = {"screen": "keypad"}
+            encs[i] = {"page": 1, "push": push}
+        else:
+            step = old.get("step", 1) if "attribute" in old else 1
+            encs[i] = {"attribute": choice, "step": step, "push": {"resolution": choice}}
+        save_config(self.b.cfg)
+        print(f"Encoder {i + 1} now controls {choice}.")
 
     # ---- live updates
     def button_lit(self, btn):
@@ -853,8 +971,12 @@ class Screen:
         if waiting:
             text += "\n" + ("^ ^ ^" if pos < ma else "v v v")
         marker = int(pos * 10) if (ma is not None and pos is not None) else -1
+        # the sequence's colour from MA: dimmed behind, brighter for the level
+        color = b.ma["color"].get(f["exec"]) if b.ma_linked() else None
+        bg, bar = (shade(color, 0.4), shade(color, 0.85)) if color else (C_BAR_BG, C_BAR)
+        bg, bar = bg or C_BAR_BG, bar or C_BAR
         self.setw(self.FADER0 + i, value=int((shown or 0) * 10), text=text, marker=marker,
-                  colors=(C_BAR_BG, C_CMD if waiting else C_TEXT, C_WAIT if waiting else C_BAR))
+                  colors=(bg, C_CMD if waiting else C_TEXT, C_WAIT if waiting else bar))
 
     def keypad_text(self):
         if self.b.ma_linked():
@@ -879,12 +1001,19 @@ class Screen:
                 self.set_screen("main")
             else:
                 self.b.ma_key(act["keypad"])
+        elif "back" in act:
+            self.set_screen("encoders" if self.name.startswith("pick") else "main")
+        elif "choice" in act:
+            self.assign_encoder(act["pick"], act["choice"])
+            self.set_screen("encoders")
+        elif "pick" in act:
+            self.set_screen(f"pick{act['pick']}")
         else:
             self.b.do_action(act, True)
 
     def on_release(self, wid):
         act = self.keymap.get(wid)
-        if act and "keypad" not in act:
+        if act and not any(k in act for k in ("keypad", "back", "pick")):
             self.b.do_action(act, False)
 
     def local_key(self, k):
@@ -966,7 +1095,7 @@ class Bridge:
         self.fader_cmd_pending = [None] * 5
         self.verbose = False
         self.ma = dict(alive=0.0, page=None, fader={}, run={}, name={}, master={}, cmdline="",
-                       busy="", busy_at=0.0, res={})
+                       busy="", busy_at=0.0, res={}, color={})
         self.enc_edge_at = [0.0, 0.0]        # encoder click-size auto-detection
         self.enc_checked = [0.0, 0.0]
         self.enc_rest = [{}, {}]              # settled state -> times seen
@@ -977,6 +1106,7 @@ class Bridge:
         self.pins = {}
         self.encs = []
         self.pi_ready = False
+        self.pi_heard = 0.0
         self.pi_proto = 0
         self.build_maps()
 
@@ -990,6 +1120,9 @@ class Bridge:
             start_thread(self.osc_reader, rx)
         except OSError as e:
             print(f"Can't listen for MA feedback on port {o['listen_port']}: {e}")
+            if getattr(e, "errno", None) in (48, 98, 10048):  # address in use (Mac, Linux, Windows)
+                print("  Another bridge is probably still running (e.g. the auto-start one):"
+                      " it sends to MA too. Stop it first.")
 
     @staticmethod
     def osc_reader(rx):
@@ -1108,7 +1241,8 @@ class Bridge:
         pieces = [h[off:off + 240] for off in range(0, len(h), 240)]
         attrs = ",".join(sorted({e["attribute"] for e in self.cfg["encoders"] if e and e.get("attribute")}
                                 | {e["push"]["resolution"] for e in self.cfg["encoders"]
-                                   if e and isinstance(e.get("push"), dict) and "resolution" in e["push"]})) or "Dimmer"
+                                   if e and isinstance(e.get("push"), dict) and "resolution" in e["push"]}
+                                | set(self.cfg.get("encoder_attributes", [])))) or "Dimmer"
         attrs = re.sub(r"[^A-Za-z0-9,_]", "", attrs)
         start = 'Lua "' + self.MA_RUN.replace("{arg}", f"__start {line} {tick} {attrs}") + '"'
 
@@ -1146,7 +1280,7 @@ class Bridge:
         addr, arg = fader_message(fmt, self.page, self.cfg["faders"][i]["exec"], value)
         self.osc(addr, arg)
         if self.verbose:
-            print(f"fader {i + 1}: {round(value)}%  ->  {addr} {arg}")
+            print(f"{time.strftime('%H:%M:%S')}.{int(now * 1000) % 1000:03d}  fader {i + 1}: {addr} {arg}")
 
     def fader_interval(self, fmt):
         iv = float(self.cfg["osc"].get("fader_interval", 0.025))
@@ -1185,7 +1319,7 @@ class Bridge:
             return
         self.page = page
         self.cfg["page"] = page
-        self.ma["fader"], self.ma["run"], self.ma["name"] = {}, {}, {}
+        self.ma["fader"], self.ma["run"], self.ma["name"], self.ma["color"] = {}, {}, {}, {}
         for i in range(5):  # new page: catch each fader again before it takes over
             self.picked[i] = not self.cfg.get("pickup", True)
         if self.pi_ready:
@@ -1225,6 +1359,7 @@ class Bridge:
 
     def on_mega(self, line):
         if line.startswith(">"):
+            self.pi_heard = time.time()
             self.on_pi(line[1:])
             return
         k = re.match(r"K(\d+) (\d+) ([01])$", line)
@@ -1384,7 +1519,7 @@ class Bridge:
         scr = self.screen if self.pi_ready else None
         if what == "page" and isinstance(val, int):
             self.set_page(val, from_ma=True)
-        elif what.startswith(("fader/", "run/", "name/")):
+        elif what.startswith(("fader/", "run/", "name/", "color/")):
             kind, ex = what.split("/", 1)
             ex = int(ex)
             if kind == "fader":
@@ -1409,7 +1544,7 @@ class Bridge:
                 if scr:
                     scr.update_buttons()
             else:
-                ma["name"][ex] = str(val or "")
+                ma[kind][ex] = str(val or "")
                 for i, f in enumerate(self.cfg["faders"]):
                     if f["exec"] == ex and scr:
                         scr.update_fader(i)
@@ -1428,6 +1563,8 @@ class Bridge:
                 scr.update_cmdline()
         elif what.startswith("res/"):
             ma["res"][what.split("/", 1)[1]] = float(val or 1)
+            if scr:
+                scr.update_encoders()
         elif what == "started":
             print(f"MA3 code running (update every {val} s).")
         if scr and not was_linked:
@@ -1463,6 +1600,7 @@ class Bridge:
         while True:
             self.ser = connect(self.cfg)
             self.pi_ready = False
+            self.pi_heard = 0.0
             try:
                 if sync_setup(self.cfg, self.ser):
                     self.build_maps()
@@ -1503,9 +1641,16 @@ class Bridge:
                     self.ma["busy"] = ""
                     if self.pi_ready:
                         self.screen.update_cmdline()
+                if self.pi_ready and now - self.pi_heard > 25:  # it reports every 10 s
+                    print("Touchscreen went quiet, looking for it again...")
+                    self.pi_ready = False
                 if now - last_ping > 1:
                     last_ping = now
-                    self.to_pi("PING")
+                    # Until the screen has answered, ask who's there: a plain PING
+                    # tells it a computer is listening, so it stops announcing
+                    # itself and (plugged in after the bridge started) would stay
+                    # black forever.
+                    self.to_pi("PING" if self.pi_ready else "?")
                 if self.pi_ready and now - last_status > 1:
                     last_status = now
                     self.screen.update_header()
