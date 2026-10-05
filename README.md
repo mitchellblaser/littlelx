@@ -255,7 +255,8 @@ a `{"cmd": ...}` using `{d}` for the step.
 **Encoders follow MA's encoders**: the selected feature's attributes for the
 selected fixture, two at a time (the **1/2** button on the Encoders page swaps
 pairs). The page shows each attribute's value in MA's colours (red = in the
-programmer) and its Coarse/Fine (tap, or press the encoder, to toggle). With
+programmer) and its Coarse/Fine (tap to toggle). **Click an encoder** (or tap its
+value) to type a value for its attribute: number pad, then Set. With
 nothing selected in MA they fall back to what's set in the config (Dimmer and
 Page). If the page stays on
 "Select fixtures in MA" although fixtures are selected, run

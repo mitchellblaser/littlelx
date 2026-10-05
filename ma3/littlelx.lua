@@ -297,6 +297,51 @@ local function probe()
 	end
 	local sf = try(SelectionFirst)
 	say("selection first:", sf)
+	-- named values (gobos etc.) of the selected feature's attributes
+	local function kids(h)
+		local ok, c = pcall(function() return h:Children() end)
+		return ok and type(c) == "table" and c or {}
+	end
+	local function cls(h)
+		local ok, c = pcall(function() return h:GetClass() end)
+		return ok and c or type(h)
+	end
+	local function show_sets(label, h)
+		say("  " .. label .. ":", cls(h), oname(h))
+		for n, f in ipairs(kids(h)) do
+			if n > 6 then say("    ...") break end
+			say("    " .. cls(f), oname(f), "From=", tostring(prop(f, "DMXFrom", "From")),
+				"PhysFrom=", tostring(prop(f, "PhysicalFrom")), "PhysTo=", tostring(prop(f, "PhysicalTo")))
+			for m, set in ipairs(kids(f)) do
+				if m > 8 then say("      ...") break end
+				say("      " .. cls(set), oname(set), "From=", tostring(prop(set, "DMXFrom", "From")),
+					"PhysFrom=", tostring(prop(set, "PhysicalFrom")), "PhysTo=", tostring(prop(set, "PhysicalTo")))
+			end
+		end
+	end
+	if sf ~= nil and feat then
+		for n, a in ipairs(feature_attrs(oname(feat) or "")) do
+			if n > 2 then break end
+			local ai = try(GetAttributeIndex, a.name)
+			local ui = ai and try(GetUIChannelIndex, sf, ai)
+			say("sets for", a.name, "attr", ai, "ui", ui)
+			if ui then
+				local ch = try(GetUIChannel, ui)
+				dump("  GetUIChannel", ch)
+				for _, k in ipairs({ "logical_channel", "LogicalChannel", "channel_function", "dmx_channel" }) do
+					local h = type(ch) == "table" and ch[k]
+					if h and type(h) ~= "number" then show_sets(k, h) end
+				end
+				for nargs = 2, 1, -1 do
+					local cf = nargs == 2 and try(GetChannelFunction, ui, ai) or try(GetChannelFunction, ui)
+					if cf ~= nil then
+						if type(cf) == "table" or type(cf) == "userdata" then show_sets("GetChannelFunction/" .. nargs, cf)
+						else say("  GetChannelFunction/" .. nargs, "=", tostring(cf)) end
+					end
+				end
+			end
+		end
+	end
 	if sf ~= nil then
 		local ai = try(GetAttributeIndex, "DIMMER") or try(GetAttributeIndex, "Dimmer")
 		local ui = ai and try(GetUIChannelIndex, sf, ai)

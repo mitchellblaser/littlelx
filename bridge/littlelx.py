@@ -72,7 +72,7 @@ def bridge_version():
 #   {"cmd": "... {d} ..."}               {d} = step per click, or {"page": 1}
 # Push actions also allow {"resolution": "Dimmer"}: toggle MA's Coarse/Fine.
 
-CONFIG_VERSION = 7
+CONFIG_VERSION = 8
 
 DEFAULTS = {
     "config_version": CONFIG_VERSION,
@@ -104,7 +104,7 @@ DEFAULTS = {
     "encoders": [
         # "follow": turn MA's encoders (the selected feature's attributes, a pair
         # at a time); the rest is used when MA has none (nothing selected)
-        {"follow": True, "attribute": "Dimmer", "step": 1, "push": {"resolution": "Dimmer"}},
+        {"follow": True, "attribute": "Dimmer", "step": 1},  # click: type a value
         {"follow": True, "page": 1, "push": {"screen": "keypad"}},
     ],
     "touch_buttons": [
@@ -178,6 +178,10 @@ def migrate(cfg):
         cfg["keys"] = copy.deepcopy(DEFAULTS["keys"])
         print("Keys updated: 1-5 Page -, Page +, Clear, Oops, Please; 6-10 exec 301-305;"
               " 11-15 exec 201-205; 16-20 exec 101-105 (change them on the touchscreen: Setup).")
+    if cfg.get("config_version", 1) < 8:  # v8: an encoder click types a value, not Coarse/Fine
+        for e in cfg.get("encoders", []):
+            if e and isinstance(e.get("push"), dict) and "resolution" in e["push"]:
+                e.pop("push")
     if cfg.get("config_version", 1) < 6:  # encoders follow MA's encoders
         for e in cfg.get("encoders", []):
             if e is not None:
@@ -740,6 +744,7 @@ class Screen:
         self.keymap_hdr = {}
         self.exec_entry = ""
         self.reset_armed = 0.0
+        self.value_entry = ""
         self.cmdline = ""      # local command line (used when MA isn't linked)
         self.keymap = {}
         self.w, self.h = 320, 480
@@ -860,6 +865,8 @@ class Screen:
             self.draw_key_editor(int(self.name[3:]))
         elif self.name.startswith("exec"):
             self.draw_exec_entry(int(self.name[4:]))
+        elif self.name.startswith("entry"):
+            self.draw_value_entry(int(self.name[5:]))
         else:
             self.draw_main()
 
@@ -948,13 +955,17 @@ class Screen:
             self.widget(base + 4, "L", 4, y, w - 8, 26, C_PANEL, C_DIM, C_PANEL, 0 if not self.enc_mode else 1,
                         1, 0, title)
             vh = ph - 26 - 62
-            self.widget(base + 1, "L", 8, y + 28, w - 16, vh, C_PANEL, C_TEXT, C_PANEL, 2, 0, 0, "")
+            self.keymap[base + 1] = {"entry": i}  # tap the value to type one
+            self.widget(base + 1, "B", 8, y + 28, w - 16, vh, C_PANEL, C_TEXT, C_PANEL, 2, 0, 0, "")
             by, bh = y + 30 + vh, ph - 30 - vh - 10
             self.widget(base + 2, "B", 8, by, w - 16, bh, C_BTN, C_TEXT, C_BTN_ON, 1, 0, 0, "")
         self.back_button()
         self.update_encoders()
 
     def update_encoders(self):
+        if self.name.startswith("entry"):  # typing a value: keep MA's current one fresh
+            self.setw(self.SET_TITLE, text=self.value_title(int(self.name[5:])))
+            return
         if self.name != "encoders":
             return
         b = self.b
@@ -1001,6 +1012,37 @@ class Screen:
                 self.keymap[base + 2] = {"resolution": act["attribute"]}
                 self.setw(base + 2, value=1 if res in ("Fine", "Ultra") else 0, text=res,
                           colors=(C_BTN, C_TEXT, C_BTN_ON))
+
+    # ---- typing a value for an encoder's attribute (encoder click)
+    def value_title(self, i):
+        a = self.b.encoder_attr(i)
+        if not a:
+            return "-"
+        now = f"   (now {a[2]})" if a[2] else ""
+        return f"{a[1]}{now}\n{self.value_entry or ''}_"
+
+    def draw_value_entry(self, i):
+        w = self.w
+        top = self.header_h() + 4
+        self.keymap = {}
+        self.value_entry = ""
+        self.widget(self.SET_TITLE, "L", 4, top, w - 8, 64, "000000", C_CMD, "000000", 1, 0, 0, self.value_title(i))
+        gy = top + 70
+        bw, bh = (w - 4) // 3, (self.h - 4 - gy) // 5
+        keys = ["7", "8", "9", "4", "5", "6", "1", "2", "3", ".", "0", "<-"]
+        for n, k in enumerate(keys):
+            r, c = divmod(n, 3)
+            wid = self.SET0 + n
+            self.keymap[wid] = {"vkey": k, "enc": i}
+            self.widget(wid, "B", 4 + c * bw, gy + r * bh, bw - 3, bh - 4, C_BTN if k.isdigit() else C_KEY2,
+                        C_TEXT, C_BTN_ON, 1, 0, 0, k)
+        y = gy + 4 * bh
+        self.keymap[self.SET0 + 12] = {"vkey": "-", "enc": i}
+        self.widget(self.SET0 + 12, "B", 4, y, bw - 3, bh - 4, C_KEY2, C_TEXT, C_BTN_ON, 1, 0, 0, "+/-")
+        self.keymap[self.BACK] = {"back": True}
+        self.widget(self.BACK, "B", 4 + bw, y, bw - 3, bh - 4, C_KEY2, C_TEXT, C_BTN_ON, 1, 0, 0, "Back")
+        self.keymap[self.SET0 + 13] = {"vkey": "Set", "enc": i}
+        self.widget(self.SET0 + 13, "B", 4 + 2 * bw, y, bw - 3, bh - 4, C_BTN_ON, C_TEXT, C_BTN_ON, 1, 0, 0, "Set")
 
     # ---- Setup: what each hardware key does
     KEY_CHOICES = [
@@ -1214,6 +1256,28 @@ class Screen:
                 self.exec_entry = (self.exec_entry + d).lstrip("0")
             self.setw(self.SET_TITLE, text=self.exec_title(act["key"]))
             return
+        if "entry" in act:
+            if self.b.encoder_attr(act["entry"]):
+                self.set_screen(f"entry{act['entry']}")
+            return
+        if "vkey" in act:
+            k, i = act["vkey"], act["enc"]
+            a = self.b.encoder_attr(i)
+            if k == "Set":
+                if a and self.value_entry not in ("", "-", "."):
+                    self.b.set_value(a[0], self.value_entry)
+                self.set_screen("encoders")
+                return
+            if k == "<-":
+                self.value_entry = self.value_entry[:-1]
+            elif k == "-":
+                self.value_entry = self.value_entry[1:] if self.value_entry.startswith("-") else "-" + self.value_entry
+            elif k == "." and "." in self.value_entry:
+                return
+            elif len(self.value_entry) < 8:
+                self.value_entry += k
+            self.setw(self.SET_TITLE, text=self.value_title(i))
+            return
         if "reset_keys" in act:
             if time.time() - self.reset_armed > 4:  # first tap: ask for a second one
                 self.reset_armed = time.time()
@@ -1234,6 +1298,7 @@ class Screen:
                 self.b.ma_key(act["keypad"])
         elif "back" in act:
             self.set_screen("setup" if self.name.startswith("key") else
+                            "encoders" if self.name.startswith("entry") else
                             f"key{self.name[4:]}" if self.name.startswith("exec") else "main")
         elif "encpage" in act:
             self.b.next_enc_page()
@@ -1243,7 +1308,7 @@ class Screen:
     def on_release(self, wid):
         act = self.keymap.get(wid)
         if act and not any(k in act for k in ("keypad", "back", "encpage", "edit", "assign",
-                                              "digit", "reset_keys")):
+                                              "digit", "reset_keys", "entry", "vkey")):
             self.b.do_action(act, False)
 
     def local_key(self, k):
@@ -1423,15 +1488,28 @@ class Bridge:
         if self.pi_ready:
             self.screen.update_encoders()
 
-    def encoder_push(self, i, down):
-        act = self.cfg["encoders"][i] if i < len(self.cfg["encoders"]) else {}
+    def encoder_attr(self, i):
+        """-> (attribute, display name, MA's value text) encoder i controls, or None."""
         if self.following(i):
             e = self.ma_encoder(i)
-            if e and down:
-                self.ma_plugin(f"res {e['attr']}")
+            return (e["attr"], e["pretty"], e["value"]) if e else None
+        encs = self.cfg["encoders"]
+        act = encs[i] if i < len(encs) and encs[i] else {}
+        return (act["attribute"], act["attribute"], "") if "attribute" in act else None
+
+    def encoder_push(self, i, down):
+        """Click: type a value for the encoder's attribute (Coarse/Fine is on the
+        screen). An encoder without an attribute (Page) does its push action."""
+        if self.encoder_attr(i) or self.following(i):
+            if down and self.pi_ready and self.encoder_attr(i):
+                self.screen.set_screen("encoders" if self.screen.name == f"entry{i}" else f"entry{i}")
             return
+        act = self.cfg["encoders"][i] if i < len(self.cfg["encoders"]) else {}
         if act and act.get("push"):
             self.do_action(act["push"], down)
+
+    def set_value(self, attr, text):
+        self.ma_cmd(f'Attribute "{attr}" At {text}')
 
     def ma_fader(self, i):
         """MA's real level for fader i on the current page, if known."""
