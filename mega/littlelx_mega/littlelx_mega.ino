@@ -4,6 +4,9 @@
  * The Mega is the only thing plugged into the computer. It:
  *   - reports every input pin change and analog value over USB, so the wiring
  *     does not need to be known in advance (the computer "learns" it),
+ *   - scans key matrices without knowing their layout: it pulls one pin LOW
+ *     at a time and reports any other pin that follows (a pressed key joins
+ *     the two). Any number/size of matrices, with or without diodes,
  *   - relays the Raspberry Pi touchscreen on Serial3:
  *       Mega TX3 (pin 14) -> divider (1k + 2k) -> Pi GPIO15 / RXD (header pin 10)
  *       Mega RX3 (pin 15) <- Pi GPIO14 / TXD (header pin 8), plus GND.
@@ -14,6 +17,7 @@
  *     PI 3                touchscreen port (Serial3)
  *     D<pin> <0|1>        digital pin changed (pullups: 0 = pressed)
  *     A<ch> <0..1023>     analog input A<ch> changed
+ *     K<a> <b> <1|0>      matrix key between pins a < b pressed / released
  *     ><text>             line from the Pi
  *   computer -> Mega
  *     ?                   HELLO, PI and a dump of every input
@@ -21,10 +25,21 @@
  *                         add 8 for no debounce (rotary encoders)
  *     ><text>             send line to the Pi (streamed through byte by byte,
  *                         so lines of any length and full-speed updates work)
+ *     R<addr> <len>       read EEPROM (len <= 32)       -> E<addr> <hex>
+ *     W<addr> <hex>       write EEPROM (<= 32 bytes)    -> W<addr> OK
+ *
+ * EEPROM (written by the computer, so the setup lives on the controller):
+ *     0-1    'L' 'X'      pin mode table present
+ *     2-71   pin modes    applied at power-up (0xff = default)
+ *     128-   learned setup blob (the computer's format; the Mega only stores it)
  *
  * Defaults: D2-D53 = input+pullup (debounced), A0-A15 = analog.
+ * Matrix scanning uses every pin in mode 2 (pullup, debounced); encoders
+ * (mode 10) and analog pins are left out.
  * Pins 0/1 (USB) and 14/15 (Pi) are not scanned; everything else is.
  */
+
+#include <EEPROM.h>
 
 #define NPINS 70
 #define DEBOUNCE_MS 4
@@ -39,6 +54,17 @@ enum { M_OFF = 0, M_INPUT = 1, M_PULLUP = 2, M_ANALOG = 3, M_RAW = 8 };
 static uint8_t mode[NPINS];
 static volatile uint8_t *pinreg[NPINS];
 static uint8_t pinmask[NPINS];
+static volatile uint8_t *portreg[NPINS], *ddrreg[NPINS];
+
+/* matrix scanning */
+#define MX_MAX 24                 /* keys tracked at once */
+#define MX_PRESS 2                /* full scans a key must be seen to count */
+#define MX_RELEASE 2              /* full scans it must be gone to release */
+static uint8_t mx_pins[NPINS], mx_n, mx_idx;
+static bool mx_dirty = true;
+static uint8_t mx_found[MX_MAX][2], mx_nfound;
+static struct { uint8_t a, b, seen, missed, down; } mx_keys[MX_MAX];
+static uint8_t mx_nkeys;
 static uint8_t state[NPINS];      /* reported state */
 static uint8_t lastread[NPINS];
 static uint16_t changed_at[NPINS];
@@ -61,6 +87,7 @@ static bool pin_reserved(uint8_t p)
 
 static void apply_mode(uint8_t p)
 {
+	mx_dirty = true;
 	uint8_t m = mode[p] & 7;
 	if (pin_reserved(p))
 		return;
@@ -92,6 +119,16 @@ static void report_analog(uint8_t ch)
 	Serial.println(asent[ch]);
 }
 
+static void report_key(uint8_t i)
+{
+	Serial.print('K');
+	Serial.print(mx_keys[i].a);
+	Serial.print(' ');
+	Serial.print(mx_keys[i].b);
+	Serial.print(' ');
+	Serial.println(mx_keys[i].down);
+}
+
 static void dump_all()
 {
 	Serial.println(F("HELLO littlelx-mega 1"));
@@ -105,11 +142,47 @@ static void dump_all()
 		else
 			report_digital(p);
 	}
+	for (uint8_t i = 0; i < mx_nkeys; i++)
+		if (mx_keys[i].down)
+			report_key(i);
+}
+
+static uint8_t hexval(char c)
+{
+	return c <= '9' ? c - '0' : (c | 0x20) - 'a' + 10;
 }
 
 static void usb_line(char *s)
 {
-	if (s[0] == '?') {
+	if (s[0] == 'R') {
+		char *sp;
+		long a = strtol(s + 1, &sp, 10);
+		long n = strtol(sp, NULL, 10);
+		if (a < 0 || n < 0 || n > 32 || a + n > (long)EEPROM.length())
+			return;
+		Serial.print('E');
+		Serial.print(a);
+		Serial.print(' ');
+		for (long i = 0; i < n; i++) {
+			uint8_t b = EEPROM.read(a + i);
+			Serial.print("0123456789abcdef"[b >> 4]);
+			Serial.print("0123456789abcdef"[b & 15]);
+		}
+		Serial.println();
+	} else if (s[0] == 'W') {
+		char *sp;
+		long a = strtol(s + 1, &sp, 10);
+		if (*sp == ' ')
+			sp++;
+		long n = strlen(sp) / 2;
+		if (a < 0 || n > 32 || a + n > (long)EEPROM.length())
+			return;
+		for (long i = 0; i < n; i++)
+			EEPROM.update(a + i, (hexval(sp[2 * i]) << 4) | hexval(sp[2 * i + 1]));
+		Serial.print('W');
+		Serial.print(a);
+		Serial.println(F(" OK"));
+	} else if (s[0] == '?') {
 		dump_all();
 	} else if (s[0] == 'M') {
 		char *sp;
@@ -199,6 +272,103 @@ static void scan_digital()
 	}
 }
 
+static void mx_note(uint8_t a, uint8_t b)
+{
+	if (a > b) { uint8_t t = a; a = b; b = t; }
+	for (uint8_t i = 0; i < mx_nfound; i++)
+		if (mx_found[i][0] == a && mx_found[i][1] == b)
+			return;
+	if (mx_nfound < MX_MAX) {
+		mx_found[mx_nfound][0] = a;
+		mx_found[mx_nfound][1] = b;
+		mx_nfound++;
+	}
+}
+
+/* End of a full scan: debounce what was found against what is tracked. */
+static void mx_cycle_done()
+{
+	for (uint8_t i = 0; i < mx_nkeys; i++) {
+		bool hit = false;
+		for (uint8_t j = 0; j < mx_nfound; j++)
+			if (mx_found[j][0] == mx_keys[i].a && mx_found[j][1] == mx_keys[i].b) {
+				hit = true;
+				mx_found[j][0] = 0xff; /* consumed */
+			}
+		if (hit) {
+			mx_keys[i].missed = 0;
+			if (mx_keys[i].seen < 255)
+				mx_keys[i].seen++;
+		} else {
+			mx_keys[i].seen = 0;
+			mx_keys[i].missed++;
+		}
+	}
+	for (uint8_t j = 0; j < mx_nfound; j++) /* newly seen pairs */
+		if (mx_found[j][0] != 0xff && mx_nkeys < MX_MAX) {
+			mx_keys[mx_nkeys].a = mx_found[j][0];
+			mx_keys[mx_nkeys].b = mx_found[j][1];
+			mx_keys[mx_nkeys].seen = 1;
+			mx_keys[mx_nkeys].missed = 0;
+			mx_keys[mx_nkeys].down = 0;
+			mx_nkeys++;
+		}
+	for (uint8_t i = 0; i < mx_nkeys;) {
+		if (!mx_keys[i].down && mx_keys[i].seen >= MX_PRESS) {
+			mx_keys[i].down = 1;
+			report_key(i);
+		} else if (mx_keys[i].down && mx_keys[i].missed >= MX_RELEASE) {
+			mx_keys[i].down = 0;
+			report_key(i);
+		}
+		if (!mx_keys[i].down && mx_keys[i].missed >= MX_RELEASE)
+			mx_keys[i] = mx_keys[--mx_nkeys]; /* forget it */
+		else
+			i++;
+	}
+	mx_nfound = 0;
+}
+
+/* Drive one candidate pin LOW per call and see which others follow. */
+static void scan_matrix()
+{
+	if (mx_dirty) {
+		mx_n = 0;
+		for (uint8_t p = 2; p < NPINS; p++)
+			if (mode[p] == M_PULLUP && !pin_reserved(p))
+				mx_pins[mx_n++] = p;
+		mx_idx = 0;
+		mx_nfound = 0;
+		mx_dirty = false;
+	}
+	if (mx_n < 2)
+		return;
+	uint8_t p = mx_pins[mx_idx];
+	if (state[p]) { /* skip pins already low at rest (direct button held) */
+		uint8_t m = pinmask[p];
+		uint8_t sreg = SREG;
+		cli();
+		*portreg[p] &= ~m; /* pull-up off ... */
+		*ddrreg[p] |= m;   /* ... then drive low */
+		SREG = sreg;
+		delayMicroseconds(4);
+		for (uint8_t k = 0; k < mx_n; k++) {
+			uint8_t q = mx_pins[k];
+			if (q != p && state[q] && !(*pinreg[q] & pinmask[q]))
+				mx_note(p, q);
+		}
+		sreg = SREG;
+		cli();
+		*ddrreg[p] &= ~m;  /* back to input ... */
+		*portreg[p] |= m;  /* ... with pull-up */
+		SREG = sreg;
+	}
+	if (++mx_idx >= mx_n) {
+		mx_idx = 0;
+		mx_cycle_done();
+	}
+}
+
 /* Non-blocking ADC, two conversions per channel:
  *   pass 0: convert the internal 0 V channel. This empties the ADC's sample
  *           capacitor, so an unconnected (floating) pin is pulled to 0 and
@@ -264,7 +434,14 @@ void setup()
 	for (uint8_t p = 0; p < NPINS; p++) {
 		pinreg[p] = portInputRegister(digitalPinToPort(p));
 		pinmask[p] = digitalPinToBitMask(p);
+		portreg[p] = portOutputRegister(digitalPinToPort(p));
+		ddrreg[p] = portModeRegister(digitalPinToPort(p));
 		mode[p] = p >= 54 ? M_ANALOG : M_PULLUP;
+		if (EEPROM.read(0) == 'L' && EEPROM.read(1) == 'X') {
+			uint8_t m = EEPROM.read(2 + p); /* learned setup */
+			if (m != 0xff && (m & 7) <= M_ANALOG && !((m & 7) == M_ANALOG && p < 54))
+				mode[p] = m;
+		}
 		apply_mode(p);
 	}
 	for (uint8_t i = 0; i < 16; i++) {
@@ -280,5 +457,6 @@ void loop()
 {
 	poll_serial();
 	scan_digital();
+	scan_matrix();
 	scan_analog();
 }

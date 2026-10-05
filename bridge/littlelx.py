@@ -90,8 +90,8 @@ DEFAULTS = {
     # Filled in by --learn
     "hw": {
         "faders": [None] * 5,      # {"ch": 0..15, "lo": 0, "hi": 1023}
-        "keys": [None] * 20,       # {"pin": 22} digital, active low
-        "encoders": [None] * 2,    # {"a": 2, "b": 3, "push": 4, "div": 4}
+        "keys": [None] * 20,       # {"pin": 22} to GND, or {"pair": [22, 31]} matrix
+        "encoders": [None] * 2,    # {"a": 2, "b": 3, "push": 4 or [22, 31], "div": 4}
         "pin_modes": {},           # {"54": 2, ...} sent to the Mega on connect
     },
     "touch_cal": None,
@@ -312,6 +312,117 @@ def connect(cfg, verbose=True):
             print("Waiting for the controller to be plugged in...")
         verbose = False
         time.sleep(2)
+
+
+# ------------------------------------------------- setup stored on the Mega
+#
+# The learned wiring + calibrations live in the Mega's EEPROM, so they travel
+# with the controller to any computer. Layout: 0-1 "LX", 2-71 pin modes (the
+# Mega applies them at power-up), 128+ "CF" len16 crc32 zlib(JSON).
+
+EE_MODES, EE_BLOB, EE_SIZE = 0, 128, 4096
+
+
+def wait_line(ser, pred, timeout):
+    end = time.time() + timeout
+    while time.time() < end:
+        try:
+            kind, src, line = events.get(timeout=0.1)
+        except queue.Empty:
+            continue
+        if kind == "lost" and src is ser:
+            raise OSError("controller disconnected")
+        if kind == "mega" and src is ser and pred(line):
+            return line
+    return None
+
+
+def mega_read(ser, addr, n):
+    out = b""
+    while len(out) < n:
+        a, k = addr + len(out), min(32, n - len(out))
+        for _ in range(3):
+            ser.send(f"R{a} {k}")
+            line = wait_line(ser, lambda l: l.startswith(f"E{a} "), 1.0)
+            if line:
+                break
+        else:
+            raise TimeoutError("no EEPROM answer (old Mega firmware?)")
+        out += bytes.fromhex(line.split(" ", 1)[1])
+    return out
+
+
+def mega_write(ser, addr, data):
+    for off in range(0, len(data), 32):
+        a = addr + off
+        for _ in range(3):
+            ser.send(f"W{a} {data[off:off + 32].hex()}")
+            if wait_line(ser, lambda l: l == f"W{a} OK", 2.0):
+                break
+        else:
+            raise TimeoutError("EEPROM write not confirmed")
+
+
+def learned(cfg):
+    hw = cfg["hw"]
+    return any(hw["faders"] + hw["keys"] + hw["encoders"])
+
+
+def setup_blob(cfg):
+    return {"hw": cfg["hw"], "touch_cal": cfg.get("touch_cal")}
+
+
+def save_to_mega(cfg, ser):
+    data = zlib.compress(json.dumps(setup_blob(cfg), separators=(",", ":")).encode(), 9)
+    if len(data) > EE_SIZE - EE_BLOB - 8:
+        print("Setup too big for the controller's memory; kept on this computer only.")
+        return
+    modes = bytearray([0xff] * 70)
+    for pin, m in cfg["hw"]["pin_modes"].items():
+        modes[int(pin)] = int(m)
+    try:
+        mega_write(ser, EE_BLOB + 8, data)  # data first, header (with CRC) last
+        mega_write(ser, EE_BLOB, b"CF" + struct.pack("<HI", len(data), zlib.crc32(data)))
+        mega_write(ser, EE_MODES, b"LX" + bytes(modes))
+        print("Setup saved on the controller (it travels with it to any computer).")
+    except (TimeoutError, OSError) as e:
+        print(f"Couldn't save the setup on the controller ({e}); it is saved on this computer.")
+
+
+def load_from_mega(ser):
+    hdr = mega_read(ser, EE_BLOB, 8)
+    if hdr[:2] != b"CF":
+        return None
+    n, crc = struct.unpack("<HI", hdr[2:])
+    if not 0 < n <= EE_SIZE - EE_BLOB - 8:
+        return None
+    data = mega_read(ser, EE_BLOB + 8, n)
+    if zlib.crc32(data) != crc:
+        return None
+    return json.loads(zlib.decompress(data))
+
+
+def sync_setup(cfg, ser):
+    """Controller copy wins; if it has none, give it ours. Returns True if cfg changed."""
+    try:
+        blob = load_from_mega(ser)
+    except TimeoutError:
+        print("This Mega firmware can't store the setup yet: re-flash mega/littlelx_mega.")
+        return False
+    except (OSError, ValueError, zlib.error):
+        blob = None
+    if blob and blob.get("hw") and any(blob["hw"].get(k) for k in ("faders", "keys", "encoders")):
+        if blob != setup_blob(cfg):
+            cfg["hw"] = blob["hw"]
+            cfg["touch_cal"] = blob.get("touch_cal")
+            save_config(cfg)
+            print("Loaded the learned setup from the controller.")
+            return True
+        return False
+    if learned(cfg):
+        print("Copying this computer's learned setup onto the controller...")
+        save_to_mega(cfg, ser)
+    return False
 
 
 # -------------------------------------------------------------- touchscreen
@@ -566,8 +677,11 @@ class Bridge:
         for i, f in enumerate(hw["faders"]):
             if f:
                 self.analog[f["ch"]] = i
+        self.matrix = {}    # (a, b) -> ("key", i) | ("enc", i, "push")
         for i, k in enumerate(hw["keys"]):
-            if k:
+            if k and "pair" in k:
+                self.matrix[tuple(k["pair"])] = ("key", i)
+            elif k:
                 self.digital[k["pin"]] = ("key", i)
         self.encs = []
         for i, e in enumerate(hw["encoders"]):
@@ -575,7 +689,9 @@ class Bridge:
             if e:
                 self.digital[e["a"]] = ("enc", i, "a")
                 self.digital[e["b"]] = ("enc", i, "b")
-                if e.get("push") is not None:
+                if isinstance(e.get("push"), list):
+                    self.matrix[tuple(e["push"])] = ("enc", i, "push")
+                elif e.get("push") is not None:
                     self.digital[e["push"]] = ("enc", i, "push")
 
     # ---- output
@@ -654,6 +770,19 @@ class Bridge:
     def on_mega(self, line):
         if line.startswith(">"):
             self.on_pi(line[1:])
+            return
+        k = re.match(r"K(\d+) (\d+) ([01])$", line)
+        if k:  # matrix key
+            what = self.matrix.get((int(k.group(1)), int(k.group(2))))
+            down = k.group(3) == "1"
+            if what and what[0] == "key":
+                act = self.cfg["keys"][what[1]] if what[1] < len(self.cfg["keys"]) else None
+                if act:
+                    self.do_action(act, down)
+            elif what:
+                act = self.cfg["encoders"][what[1]] if what[1] < len(self.cfg["encoders"]) else {}
+                if act.get("push"):
+                    self.do_action(act["push"], down)
             return
         m = re.match(r"([DA])(\d+) (\d+)$", line)
         if not m:
@@ -736,6 +865,7 @@ class Bridge:
             self.cfg["touch_cal"] = [float(x) for x in parts[1:7]]
             save_config(self.cfg)
             print("Touch calibration saved")
+            save_to_mega(self.cfg, self.ser)
             self.screen.draw()
 
     # ---- MA feedback
@@ -763,6 +893,13 @@ class Bridge:
         while True:
             self.ser = connect(self.cfg)
             self.pi_ready = False
+            try:
+                if sync_setup(self.cfg, self.ser):
+                    self.build_maps()
+            except OSError:
+                continue
+            if not learned(self.cfg):
+                print("No wiring learnt yet: run with --learn.")
             for pin, mode in self.cfg["hw"]["pin_modes"].items():
                 self.ser.send(f"M{pin} {mode}")
             self.ser.send("?")
@@ -872,12 +1009,24 @@ def learn(cfg):
     drain()
 
     used_pins = set()
+    used_pairs = set()
 
     def press(line):
+        """A direct button (pin to GND) -> pin, or a matrix key -> [a, b]."""
         m = re.match(r"D(\d+) 0$", line)
         if m and int(m.group(1)) not in used_pins:
             return int(m.group(1))
+        m = re.match(r"K(\d+) (\d+) 1$", line)
+        if m and (int(m.group(1)), int(m.group(2))) not in used_pairs:
+            return [int(m.group(1)), int(m.group(2))]
         return None
+
+    def use(p):
+        if isinstance(p, list):
+            used_pairs.add(tuple(p))
+            return f"matrix pins {p[0]}+{p[1]}"
+        used_pins.add(p)
+        return f"pin {p}"
 
     # ---- encoders first (their pins chatter while turning)
     for i in range(2):
@@ -914,8 +1063,7 @@ def learn(cfg):
         p = wait_event(ser, press)
         if p is not None:
             e["push"] = p
-            used_pins.add(p)
-            print(f"  -> push on pin {p}")
+            print(f"  -> push on {use(p)}")
         hw["encoders"][i] = e
 
     # ---- keys
@@ -926,25 +1074,26 @@ def learn(cfg):
             hw["keys"][i] = None
             print("  skipped")
             continue
-        hw["keys"][i] = {"pin": p}
-        used_pins.add(p)
-        print(f"  -> pin {p}")
+        hw["keys"][i] = {"pair": p} if isinstance(p, list) else {"pin": p}
+        print(f"  -> {use(p)}")
         time.sleep(0.15)
         drain()
 
     hw["pin_modes"] = pin_modes
     save_config(cfg)
+    save_to_mega(cfg, ser)
     print(f"\nSaved to {CONFIG_PATH}.")
     print("Next: run with --faders to calibrate the fader ends, then without options to start.")
 
 
 def calibrate_faders(cfg):
     """Record each fader's real bottom and top reading (all faders at once)."""
+    ser = connect(cfg)
+    sync_setup(cfg, ser)
     hw = cfg["hw"]
     faders = [(i, f) for i, f in enumerate(hw["faders"]) if f]
     if not faders:
         sys.exit("No faders learnt yet: run with --learn first.")
-    ser = connect(cfg)
     start_thread(stdin_reader)
     for pin, mode in hw["pin_modes"].items():  # quiet the unused analog pins
         ser.send(f"M{pin} {mode}")
@@ -1002,12 +1151,14 @@ def calibrate_faders(cfg):
         note = "  (wired upside down - handled)" if hi < lo else ""
         print(f"  Fader {i + 1} (A{f['ch']}): bottom {lo}, top {hi}{note}")
     save_config(cfg)
+    save_to_mega(cfg, ser)
     screen("Faders calibrated", None)
     print(f"Saved to {CONFIG_PATH}.")
 
 
 def calibrate(cfg):
     ser = connect(cfg)
+    sync_setup(cfg, ser)
     ser.send(">CAL")
     print("Tap the three crosses on the touchscreen...")
 
@@ -1021,7 +1172,7 @@ def calibrate(cfg):
     if cal:
         cfg["touch_cal"] = cal
         save_config(cfg)
-        print("Saved.")
+        save_to_mega(cfg, ser)
     else:
         print("No calibration received.")
 
@@ -1169,8 +1320,6 @@ def main():
         elif args.monitor:
             monitor(cfg)
         else:
-            if not any(cfg["hw"]["faders"] + cfg["hw"]["keys"]):
-                print("No wiring learnt yet: run with --learn first.")
             print(f"Sending OSC to {cfg['osc']['host']}:{cfg['osc']['port']} prefix '{cfg['osc']['prefix']}'")
             Bridge(cfg).run()
     except KeyboardInterrupt:

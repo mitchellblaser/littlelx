@@ -77,9 +77,12 @@ Mega RX3 (pin 15) ◄──────────────── Pi GPIO14 
 * Already ran it without resistors? If the screen gets stuck on "waiting for
   computer…" while the bridge says the Mega is connected, the Pi's RX pin is
   probably damaged.
-* Keys/encoders: switch to GND (the Mega uses internal pull-ups). Faders: wipers
-  on A0–A15. Any pin except 0, 1, 14 and 15 can be used. Nothing else needs to be
-  known; the learn step works out which pin is which.
+* Keys: either straight to GND, or in **key matrices** (any number, any size,
+  with or without diodes). The Mega scans for matrices without knowing their
+  rows and columns: it pulls one pin low at a time and sees which pin follows.
+  Encoders: A/B/push to GND. Faders: wipers on A0–A15. Any pin except 0, 1, 14
+  and 15 can be used. Nothing else needs to be known; the learn step works out
+  which pin is which.
 
 ### 2. Flash the Mega
 
@@ -129,6 +132,13 @@ python3 bridge/littlelx.py --learn        # Windows: littlelx.exe --learn
 
 Follow the prompts: move each fader, turn and press each encoder, and press each
 key in the order you want them numbered. Press Enter to skip any control.
+
+**You only do this once.** The learned wiring and the fader and touch calibrations
+are stored **on the controller itself** (the Mega's EEPROM) as well as on the
+computer. Plug it into any other Mac or PC running the bridge and it loads
+everything from the controller. If you set it up before this feature existed,
+the bridge copies your existing setup onto the controller the first time it
+connects.
 Everything is saved to `~/.littlelx.json` (Windows: `C:\Users\<you>\.littlelx.json`).
 
 Then calibrate the faders' real bottom and top. Pull all faders down and tap
