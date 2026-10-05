@@ -72,7 +72,7 @@ def bridge_version():
 #   {"cmd": "... {d} ..."}               {d} = step per click, or {"page": 1}
 # Push actions also allow {"resolution": "Dimmer"}: toggle MA's Coarse/Fine.
 
-CONFIG_VERSION = 5
+CONFIG_VERSION = 6
 
 DEFAULTS = {
     "config_version": CONFIG_VERSION,
@@ -100,8 +100,10 @@ DEFAULTS = {
         + [{"page": -1}, {"page": 1}, {"key": "Clear"}, {"cmd": "Go+"}, {"cmd": "Oops"}]
     ),
     "encoders": [
-        {"attribute": "Dimmer", "step": 1, "push": {"resolution": "Dimmer"}},
-        {"page": 1, "push": {"screen": "keypad"}},
+        # "follow": turn MA's encoders (the selected feature's attributes, a pair
+        # at a time); the rest is used when MA has none (nothing selected)
+        {"follow": True, "attribute": "Dimmer", "step": 1, "push": {"resolution": "Dimmer"}},
+        {"follow": True, "page": 1, "push": {"screen": "keypad"}},
     ],
     "touch_buttons": [
         {"label": "Page -", "page": -1},
@@ -168,6 +170,10 @@ def migrate(cfg):
     if cfg.get("config_version", 1) < 2:
         cfg.pop("sync_page_to_ma", None)
         cfg["pickup"] = True  # old default was off; soft takeover is now on
+    if cfg.get("config_version", 1) < 6:  # encoders follow MA's encoders
+        for e in cfg.get("encoders", []):
+            if e is not None:
+                e.setdefault("follow", True)
     if cfg.get("osc", {}).get("fader_interval") == 0.04:  # v4: faster default
         cfg["osc"]["fader_interval"] = 0.025
     for e in cfg.get("encoders", []):  # v3: attribute encoders follow MA's resolution
@@ -646,6 +652,17 @@ def shade(color, f):
 RES_LABELS = ((0.5, "Coarse"), (0.05, "Fine"), (0, "Ultra"))  # MA's step factor -> name
 
 
+def res_label(f):
+    return next(name for lim, name in RES_LABELS if f >= lim)
+
+
+C_PROG = "ff4b3e"  # programmer values: red, like MA
+FEATURE_COLORS = {  # encoder headers, by MA feature group
+    "dimmer": "d8b020", "position": "3a7bd5", "gobo": "3aa655", "color": "b03ab8",
+    "beam": "d07a2a", "focus": "2aa8a8", "control": "7a8590", "shapers": "b84848", "video": "5a5ac8",
+}
+
+
 class Screen:
     """Builds the touchscreen pages out of Pi widgets. Adapts to portrait or
     landscape using the size the panel reports in its HELLO.
@@ -659,6 +676,7 @@ class Screen:
     CMDLINE = 39
     KEY0 = 40
     ENC0 = 66      # encoders page: 10 ids per encoder
+    ENC_FEAT, ENC_PAGE = 86, 87
     PICK_TITLE = 89
     PICK0 = 90     # attribute choices
     BACK = 120
@@ -675,6 +693,7 @@ class Screen:
         self.b = bridge
         self.name = "main"
         self.dirty_faders = set()
+        self.enc_mode = False  # encoders page drawn for MA's encoders (else the set ones)
         self.cmdline = ""      # local command line (used when MA isn't linked)
         self.keymap = {}
         self.w, self.h = 320, 480
@@ -835,15 +854,15 @@ class Screen:
         self.widget(self.BACK, "B", 4, self.h - 58, self.w - 8, 54, C_KEY2, C_TEXT, C_BTN_ON, 1, 0, 0, "Back")
 
     def encoder_info(self, i):
-        """-> (what it controls, resolution label or None if it has none)."""
+        """-> (what it controls, resolution label or None if it has none),
+        for an encoder that isn't following MA's encoders."""
         encs = self.b.cfg["encoders"]
         act = encs[i] if i < len(encs) and encs[i] else {}
         if "attribute" in act:
             attr = act["attribute"]
             if not self.b.ma_linked():
                 return attr, "No MA link"
-            f = self.b.ma["res"].get(attr, 1.0)  # not reported yet: MA's default
-            return attr, next(name for lim, name in RES_LABELS if f >= lim)
+            return attr, res_label(self.b.ma["res"].get(attr, 1.0))  # not reported: MA's default
         if "page" in act:
             return "Page", None
         if "cmd" in act:
@@ -851,39 +870,84 @@ class Screen:
         return "-", None
 
     def draw_encoders(self):
-        """The two encoders, stacked like the hardware: what each one controls,
-        its resolution (tap to toggle) and Change."""
+        """The two encoders, stacked like the hardware. Following MA: the
+        selected feature, a 1/2 button to swap pairs, and for each encoder the
+        attribute, its value (red = in the programmer, like MA) and Coarse/Fine.
+        Otherwise what each encoder is set to, with Change."""
         w = self.w
+        b = self.b
+        self.enc_mode = b.ma_encoders_on()
         top = self.header_h() + 4
-        ph = (self.h - 62 - top) // 2
         self.keymap = {}
-        hw = self.b.cfg["hw"]["encoders"]
+        self.widget(self.ENC_FEAT, "L", 4, top, w - 100, 40, C_PANEL, C_TEXT, C_PANEL, 1, 1, 0, "")
+        self.keymap[self.ENC_PAGE] = {"encpage": 1}
+        self.widget(self.ENC_PAGE, "B", w - 92, top, 88, 40, C_KEY2, C_TEXT, C_BTN_ON, 1, 0, 0, "")
+        top += 46
+        ph = (self.h - 62 - top) // 2
+        hw = b.cfg["hw"]["encoders"]
         for i in range(2):
             y, base = top + i * ph, self.ENC0 + i * 10
-            title = f"Encoder {i + 1}" + ("" if i < len(hw) and hw[i] else "  (not learnt)")
             self.widget(base, "L", 4, y, w - 8, ph - 6, C_PANEL, C_DIM, C_PANEL, 0, 1, 0, "")
-            self.widget(base + 4, "L", 10, y + 4, w - 20, 18, C_PANEL, C_DIM, C_PANEL, 0, 1, 0, title)
-            self.widget(base + 1, "L", 8, y + 22, w - 16, ph // 2 - 22, C_PANEL, C_TEXT, C_PANEL, 2, 0, 0, "")
-            by, bh = y + ph // 2 + 2, ph - ph // 2 - 14
-            bw = (w - 20) // 2
-            self.widget(base + 2, "B", 8, by, bw, bh, C_BTN, C_TEXT, C_BTN_ON, 1, 0, 0, "")
-            self.keymap[base + 3] = {"pick": i}
-            self.widget(base + 3, "B", 12 + bw, by, bw, bh, C_KEY2, C_TEXT, C_BTN_ON, 1, 0, 0, "Change")
+            title = f"Encoder {i + 1}" + ("" if i < len(hw) and hw[i] else "  (not learnt)")
+            self.widget(base + 4, "L", 4, y, w - 8, 26, C_PANEL, C_DIM, C_PANEL, 0 if not self.enc_mode else 1,
+                        1, 0, title)
+            vh = ph - 26 - 62
+            self.widget(base + 1, "L", 8, y + 28, w - 16, vh, C_PANEL, C_TEXT, C_PANEL, 2, 0, 0, "")
+            by, bh = y + 30 + vh, ph - 30 - vh - 10
+            if self.enc_mode:
+                self.widget(base + 2, "B", 8, by, w - 16, bh, C_BTN, C_TEXT, C_BTN_ON, 1, 0, 0, "")
+            else:
+                bw = (w - 20) // 2
+                self.widget(base + 2, "B", 8, by, bw, bh, C_BTN, C_TEXT, C_BTN_ON, 1, 0, 0, "")
+                self.keymap[base + 3] = {"pick": i}
+                self.widget(base + 3, "B", 12 + bw, by, bw, bh, C_KEY2, C_TEXT, C_BTN_ON, 1, 0, 0, "Change")
         self.back_button()
         self.update_encoders()
 
     def update_encoders(self):
         if self.name != "encoders":
             return
+        b = self.b
+        if b.ma_encoders_on() != self.enc_mode:  # MA started/stopped giving encoders: new layout
+            self.draw_encoders()
+            return
+        ma = b.ma
+        fname, group, has_sel = ma["feat"]
+        gcolor = FEATURE_COLORS.get(group.lower(), FEATURE_COLORS.get(fname.lower(), C_KEY2))
+        pages = b.enc_pages()
+        if self.enc_mode:
+            self.setw(self.ENC_FEAT, text=" " + fname, colors=(shade(gcolor, 0.55), C_TEXT, C_PANEL))
+            self.setw(self.ENC_PAGE, text=f"{b.enc_page + 1}/{pages}",
+                      colors=(C_KEY2, C_TEXT if pages > 1 else C_DIM, C_BTN_ON))
+        else:
+            hint = ("Select fixtures in MA" if b.ma_linked() and fname else
+                    "Encoders" if b.ma_linked() else "Encoders (no MA link)")
+            self.setw(self.ENC_FEAT, text=" " + hint, colors=(C_PANEL, C_TEXT, C_PANEL))
+            self.setw(self.ENC_PAGE, text="1/1", colors=(C_KEY2, C_DIM, C_BTN_ON))
         for i in range(2):
             base = self.ENC0 + i * 10
+            if self.enc_mode:
+                e = b.ma_encoder(i)
+                if not e:
+                    self.setw(base + 4, text="", colors=(C_PANEL, C_DIM, C_PANEL))
+                    self.setw(base + 1, text="-", colors=(C_PANEL, C_DIM, C_PANEL))
+                    self.keymap.pop(base + 2, None)
+                    self.setw(base + 2, value=0, text="", colors=(C_PANEL, C_DIM, C_PANEL))
+                    continue
+                self.setw(base + 4, text=f" {i + 1}: {e['pretty']}", colors=(shade(gcolor, 0.4), C_TEXT, C_PANEL))
+                self.setw(base + 1, text=e["value"] or "-",
+                          colors=(C_PANEL, C_PROG if e["prog"] else C_TEXT, C_PANEL))
+                res = res_label(e["res"])
+                self.keymap[base + 2] = {"resolution": e["attr"]}
+                self.setw(base + 2, value=1 if res != "Coarse" else 0, text=res, colors=(C_BTN, C_TEXT, C_BTN_ON))
+                continue
             what, res = self.encoder_info(i)
-            self.setw(base + 1, text=what)
+            self.setw(base + 1, text=what, colors=(C_PANEL, C_TEXT, C_PANEL))
             if res is None:
                 self.keymap.pop(base + 2, None)
                 self.setw(base + 2, value=0, text="-", colors=(C_PANEL, C_DIM, C_PANEL))
             else:
-                act = self.b.cfg["encoders"][i]
+                act = b.cfg["encoders"][i]
                 self.keymap[base + 2] = {"resolution": act["attribute"]}
                 self.setw(base + 2, value=1 if res in ("Fine", "Ultra") else 0, text=res,
                           colors=(C_BTN, C_TEXT, C_BTN_ON))
@@ -1009,12 +1073,14 @@ class Screen:
             self.set_screen("encoders")
         elif "pick" in act:
             self.set_screen(f"pick{act['pick']}")
+        elif "encpage" in act:
+            self.b.next_enc_page()
         else:
             self.b.do_action(act, True)
 
     def on_release(self, wid):
         act = self.keymap.get(wid)
-        if act and not any(k in act for k in ("keypad", "back", "pick")):
+        if act and not any(k in act for k in ("keypad", "back", "pick", "encpage")):
             self.b.do_action(act, False)
 
     def local_key(self, k):
@@ -1096,7 +1162,9 @@ class Bridge:
         self.fader_cmd_pending = [None] * 5
         self.verbose = False
         self.ma = dict(alive=0.0, page=None, fader={}, run={}, name={}, master={}, cmdline="",
-                       busy="", busy_at=0.0, res={}, color={})
+                       busy="", busy_at=0.0, res={}, color={},
+                       feat=("", "", False), encn=0, encs={})  # MA's encoders (see report_encoders)
+        self.enc_page = 0                    # which pair of MA's encoders the hardware ones follow
         self.enc_edge_at = [0.0, 0.0]        # encoder click-size auto-detection
         self.enc_checked = [0.0, 0.0]
         self.enc_rest = [{}, {}]              # settled state -> times seen
@@ -1164,6 +1232,42 @@ class Bridge:
     # ---- MA state
     def ma_linked(self):
         return time.time() - self.ma["alive"] < 6
+
+    # ---- following MA's encoders: hardware encoder i = MA encoder 2*page + i
+    def ma_encoders_on(self):
+        return self.ma_linked() and self.ma["encn"] > 0 and any(
+            e and e.get("follow") for e in self.cfg["encoders"])
+
+    def enc_pages(self):
+        return max(1, -(-self.ma["encn"] // 2))
+
+    def ma_encoder(self, i):
+        """MA encoder that hardware encoder i follows now, or None."""
+        encs = self.cfg["encoders"]
+        if not (self.ma_encoders_on() and i < len(encs) and encs[i] and encs[i].get("follow")):
+            return None
+        k = self.enc_page * 2 + i + 1
+        return self.ma["encs"].get(k) if k <= self.ma["encn"] else None
+
+    def following(self, i):
+        """True when hardware encoder i follows MA (even onto an empty slot)."""
+        encs = self.cfg["encoders"]
+        return self.ma_encoders_on() and i < len(encs) and bool(encs[i] and encs[i].get("follow"))
+
+    def next_enc_page(self):
+        self.enc_page = (self.enc_page + 1) % self.enc_pages()
+        if self.pi_ready:
+            self.screen.update_encoders()
+
+    def encoder_push(self, i, down):
+        act = self.cfg["encoders"][i] if i < len(self.cfg["encoders"]) else {}
+        if self.following(i):
+            e = self.ma_encoder(i)
+            if e and down:
+                self.ma_plugin(f"res {e['attr']}")
+            return
+        if act and act.get("push"):
+            self.do_action(act["push"], down)
 
     def ma_fader(self, i):
         """MA's real level for fader i on the current page, if known."""
@@ -1377,9 +1481,7 @@ class Bridge:
                 if act:
                     self.do_action(act, down)
             elif what:
-                act = self.cfg["encoders"][what[1]] if what[1] < len(self.cfg["encoders"]) else {}
-                if act.get("push"):
-                    self.do_action(act["push"], down)
+                self.encoder_push(what[1], down)
             return
         m = re.match(r"([DA])(\d+) (\d+)$", line)
         if not m:
@@ -1409,20 +1511,23 @@ class Bridge:
             e = self.cfg["hw"]["encoders"][i]
             act = self.cfg["encoders"][i] if i < len(self.cfg["encoders"]) else {}
             if part == "push":
-                if act.get("push"):
-                    self.do_action(act["push"], v == 0)
+                self.encoder_push(i, v == 0)
                 return
             self.enc_edge_at[i] = time.time()
             d = self.encs[i].update(self.pins.get(e["a"], 1), self.pins.get(e["b"], 1))
             if d and e.get("reverse"):
                 d = -d
-            if d:
+            if d and self.following(i):
+                e = self.ma_encoder(i)
+                if e:
+                    self.on_encoder({"attribute": e["attr"], "step": act.get("step", 1), "res": e["res"]}, d)
+            elif d:
                 self.on_encoder(act, d)
 
     def on_encoder(self, act, d):
         if "attribute" in act:
             attr = act["attribute"]
-            factor = self.ma["res"].get(attr, 1.0) if self.ma_linked() else 1.0
+            factor = act["res"] if "res" in act else self.ma["res"].get(attr, 1.0) if self.ma_linked() else 1.0
             step = d * float(act.get("step", 1)) * factor
             self.ma_cmd(f'Attribute "{attr}" At {"+" if step > 0 else "-"} {abs(step):g}')
         elif "page" in act:
@@ -1567,6 +1672,28 @@ class Bridge:
             ma["busy"], ma["busy_at"] = str(val or ""), time.time()
             if scr:
                 scr.update_cmdline()
+        elif what == "feat":
+            p = (str(val or "") + "||").split("|")
+            ma["feat"] = (p[0], p[1], p[2] == "1")
+            if scr:
+                scr.update_encoders()
+        elif what == "encn":
+            ma["encn"] = int(val or 0)
+            if self.enc_page >= self.enc_pages():
+                self.enc_page = 0
+            if scr:
+                scr.update_encoders()
+        elif what.startswith("enc/"):
+            p = (str(val or "") + "||||").split("|")
+            try:
+                res = float(p[4] or 1)
+            except ValueError:
+                res = 1.0
+            ma["encs"][int(what[4:])] = dict(attr=p[0], pretty=p[1] or p[0], value=p[2], prog=p[3] == "p", res=res)
+            if scr:
+                scr.update_encoders()
+        elif what == "probe":
+            print("MA probe:\n  " + str(val or "").replace(" / ", "\n  "))
         elif what.startswith("res/"):
             ma["res"][what.split("/", 1)[1]] = float(val or 1)
             if scr:
@@ -1942,6 +2069,33 @@ def calibrate(cfg):
     print("Saved.")
 
 
+def ma_probe(cfg):
+    """Ask the littlelx code in MA what its Lua offers (encoder diagnostics)."""
+    o = cfg["osc"]
+    rx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        rx.bind(("0.0.0.0", int(o["listen_port"])))
+    except OSError as e:
+        sys.exit(f"Can't listen on port {o['listen_port']} ({e}): stop the bridge first.")
+    rx.settimeout(0.5)
+    tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    cmd = 'Lua "' + Bridge.MA_RUN.replace("{arg}", "probe") + '"'
+    tx.sendto(osc_message(o["prefix"].rstrip("/") + "/cmd", cmd), (o["host"], int(o["port"])))
+    print("Asked MA (needs the bridge to have installed its code at least once)...")
+    end = time.time() + 6
+    while time.time() < end:
+        try:
+            data, _ = rx.recvfrom(65536)
+        except socket.timeout:
+            continue
+        for addr, args in osc_parse(data):
+            if addr.endswith("/littlelx/probe") and args:
+                print("\n" + str(args[0]).replace(" / ", "\n"))
+                print("\nThe same lines are in MA's System Monitor (littlelx probe: ...).")
+                return
+    print("No answer. The lines may still be in MA's System Monitor (littlelx probe: ...).")
+
+
 def test_faders(cfg):
     """Try each fader message format on a real executor; keep the one that moves it."""
     o = cfg["osc"]
@@ -2183,6 +2337,7 @@ def main():
     ap.add_argument("--monitor", action="store_true", help="print raw events")
     ap.add_argument("--probe", action="store_true", help="key-matrix wiring diagnostics")
     ap.add_argument("--test-faders", action="store_true", help="find the fader format MA3 accepts")
+    ap.add_argument("--ma-probe", action="store_true", help="show what MA's Lua offers (encoder diagnostics)")
     ap.add_argument("--verbose", action="store_true", help="print every fader message sent")
     ap.add_argument("--port", help="serial port (default: auto-detect)")
     ap.add_argument("--update-pi", metavar="ZIP", help="update the touchscreen firmware")
@@ -2210,6 +2365,8 @@ def main():
             probe(cfg)
         elif args.test_faders:
             test_faders(cfg)
+        elif args.ma_probe:
+            ma_probe(cfg)
         else:
             print(f"Sending OSC to {cfg['osc']['host']}:{cfg['osc']['port']} prefix '{cfg['osc']['prefix']}'")
             b = Bridge(cfg)

@@ -238,7 +238,7 @@ letter.
 | Keys 18 / 19 / 20 | Clear / Go+ / Oops |
 | Encoder 1 | Dimmer ± 1 per click (± 0.1 when MA's Dimmer encoder resolution is Fine); push = toggle Coarse/Fine in MA |
 | Encoder 2 | Page −/+; push = Keypad screen |
-| Touchscreen | Main page: the 5 faders in their MA sequence colours (MA level + physical position, names); Page −/+, Clear, Highlight, Last, Next, Blind, Keypad, Encoders. Keypad page: a full command keypad. Encoders page: what each encoder controls and its Coarse/Fine (tap to toggle), Change to pick another attribute or Page |
+| Touchscreen | Main page: the 5 faders in their MA sequence colours (MA level + physical position, names); Page −/+, Clear, Highlight, Last, Next, Blind, Keypad, Encoders. Keypad page: a full command keypad. Encoders page: follows MA's encoders (below) |
 
 Actions are one of `{"exec": 201}`, `{"key": "Store"}` (a console key typed into
 MA's command line; `"Please"`, `"Clear"` and `"<-"` act on the line), `{"cmd": "Go+"}`
@@ -246,6 +246,15 @@ MA's command line; `"Please"`, `"Clear"` and `"<-"` act on the line), `{"cmd": "
 `{"resolution": "Dimmer"}` (toggle MA's Coarse/Fine for that attribute). Encoders
 take `{"attribute": "Pan", "step": 1}` (follows MA's Coarse/Fine), `{"page": 1}` or
 a `{"cmd": ...}` using `{d}` for the step.
+
+**Encoders follow MA's encoders**: the selected feature's attributes for the
+selected fixture, two at a time (the **1/2** button on the Encoders page swaps
+pairs). The page shows each attribute's value in MA's colours (red = in the
+programmer) and its Coarse/Fine (tap, or press the encoder, to toggle). With
+nothing selected in MA they fall back to what's set in the config (Dimmer and
+Page), and the Encoders page has Change to pick another. If the page stays on
+"Select fixtures in MA" although fixtures are selected, run
+`littlelx.py --ma-probe` (with the bridge stopped) and send the output.
 
 Encoders are counted on the computer, and a click only counts once the knob
 settles into its detent (wiggling does nothing). If an encoder needs two clicks

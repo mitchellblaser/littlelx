@@ -15,6 +15,7 @@
 --   "back"         remove the last word
 --   "page 3"       select executor page 3
 --   "res Dimmer"   toggle MA's encoder resolution for an attribute (Coarse/Fine)
+--   "probe"        print what this MA version's Lua offers (encoder diagnostics)
 --   "__start <osc line> <tick> [Attr,Attr]"   start reporting from a Timer
 --                  (bridge install); also report those attributes' resolution
 --
@@ -138,6 +139,164 @@ local function watched(no)
 	return false
 end
 
+-- ---- MA's encoders ------------------------------------------------------
+-- What MA's encoder bar shows: the selected feature's attributes that the
+-- (first) selected fixture has, with that fixture's values. Every call is
+-- guarded: MA versions differ, and a missing function just means less info.
+local MAXENC = 12
+
+local function try(f, ...)
+	if type(f) ~= "function" then return nil end
+	local ok, a, b = pcall(f, ...)
+	if ok then return a, b end
+	return nil
+end
+
+local function prop(h, ...) -- first property of h that exists, by any of these names
+	for _, k in ipairs({ ... }) do
+		local ok, v = pcall(function() return h[k] end)
+		if ok and v ~= nil then return v end
+	end
+	return nil
+end
+
+local function oname(h)
+	if type(h) == "string" then return h end
+	if h == nil then return nil end
+	local n = prop(h, "name", "Name")
+	return n and tostring(n) or nil
+end
+
+local function feature_group(feat) -- walk up to the FeatureGroup
+	local h = feat
+	for _ = 1, 4 do
+		local ok, p = pcall(function() return h:Parent() end)
+		if not ok or not p then return nil end
+		local okc, cls = pcall(function() return p:GetClass() end)
+		if okc and cls == "FeatureGroup" then return oname(p) end
+		h = p
+	end
+	return nil
+end
+
+local attr_cache = {} -- feature name -> { {name=, pretty=}, ... }
+local function feature_attrs(fname)
+	if attr_cache[fname] then return attr_cache[fname] end
+	local list = {}
+	local ok, attrs = pcall(function() return ShowData().LivePatch.AttributeDefinitions.Attributes:Children() end)
+	if ok and attrs then
+		for _, a in ipairs(attrs) do
+			if oname(prop(a, "Feature", "feature")) == fname then
+				list[#list + 1] = { name = oname(a), pretty = tostring(prop(a, "Pretty", "pretty") or oname(a)) }
+			end
+		end
+	end
+	attr_cache[fname] = list
+	return list
+end
+
+local function fmt_value(v)
+	v = num(v)
+	if not v then return nil end
+	local s = string.format("%.1f", v)
+	return (s:gsub("%.0$", ""))
+end
+
+-- -> value text, "p" if it is in the programmer (MA shows those in red)
+local function attr_value(sf, aname)
+	local ai = try(GetAttributeIndex, aname)
+	if ai == nil or sf == nil then return "", "" end
+	local ui = try(GetUIChannelIndex, sf, ai)
+	if ui == nil then return nil end -- this fixture doesn't have it
+	local p = try(GetProgPhaser, ui, false)
+	if type(p) == "table" and type(p[1]) == "table" then
+		local v = fmt_value(prop(p[1], "absolute", "abs", "value"))
+		if v then return v, "p" end
+	end
+	local ch = try(GetUIChannel, ui)
+	local rt = type(ch) == "table" and num(ch.rt_index or ch.rt_channel) or nil
+	local r = rt and try(GetRTChannel, rt)
+	if type(r) == "table" then
+		local v = fmt_value(r.final_value or r.value or r.absolute)
+		if v then return v, "" end
+	end
+	return "", ""
+end
+
+local function report_encoders()
+	local feat = try(SelectedFeature)
+	local fname = oname(feat) or ""
+	local sf = try(SelectionFirst)
+	local list = {}
+	if fname ~= "" and sf ~= nil then -- nothing selected: the encoders have nothing to turn
+		for _, a in ipairs(feature_attrs(fname)) do
+			if #list >= MAXENC then break end
+			local v, st = attr_value(sf, a.name)
+			if v ~= nil then -- nil: the selected fixture doesn't have this attribute
+				list[#list + 1] = table.concat({ a.name, a.pretty, v, st, tostring(resolution(a.name)) }, "|")
+			end
+		end
+	end
+	local head = fname .. "|" .. (feat and feature_group(feat) or "") .. "|" .. (sf ~= nil and "1" or "0")
+	if changed("feat", head) then send("feat", "s", head) end
+	if changed("encn", #list) then send("encn", "i", #list) end
+	for k, e in ipairs(list) do
+		if changed("enc" .. k, e) then send("enc/" .. k, "s", e) end
+	end
+	for k = #list + 1, MAXENC do last["enc" .. k] = nil end
+end
+
+-- "probe": print what this MA version offers, to the command line feedback
+local function probe()
+	local out = {}
+	local function say(...) local t = {} for i, v in ipairs({ ... }) do t[i] = tostring(v) end out[#out + 1] = table.concat(t, " ") end
+	local function dump(name, t)
+		if type(t) ~= "table" then say(name, "=", t) return end
+		local keys = {}
+		for k, v in pairs(t) do keys[#keys + 1] = tostring(k) .. "=" .. (type(v) == "table" and "{..}" or tostring(v)) end
+		table.sort(keys)
+		say(name, "{", table.concat(keys, ", "), "}")
+	end
+	for _, f in ipairs({ "SelectedFeature", "SelectionFirst", "GetAttributeIndex", "GetUIChannelIndex",
+		"GetProgPhaser", "GetUIChannel", "GetRTChannel", "CurrentProfile", "ShowData" }) do
+		say(f, type(_G[f]))
+	end
+	local feat = try(SelectedFeature)
+	say("feature:", oname(feat), "group:", feat and feature_group(feat))
+	if feat then
+		local ok, cls = pcall(function() return feat:GetClass() end)
+		say("feature class:", ok and cls)
+		local list = feature_attrs(oname(feat) or "")
+		local names = {}
+		for _, a in ipairs(list) do names[#names + 1] = a.name .. "(" .. a.pretty .. ")" end
+		say("attributes:", table.concat(names, " "))
+	end
+	local okA, attrs = pcall(function() return ShowData().LivePatch.AttributeDefinitions.Attributes:Children() end)
+	if okA and attrs and attrs[1] then
+		say("attribute #1:", oname(attrs[1]), "Feature=", tostring(prop(attrs[1], "Feature")), oname(prop(attrs[1], "Feature")))
+	else
+		say("attribute definitions:", okA, tostring(attrs))
+	end
+	local sf = try(SelectionFirst)
+	say("selection first:", sf)
+	if sf ~= nil then
+		local ai = try(GetAttributeIndex, "DIMMER") or try(GetAttributeIndex, "Dimmer")
+		local ui = ai and try(GetUIChannelIndex, sf, ai)
+		say("dimmer attr index", ai, "ui channel", ui)
+		if ui then
+			local p = try(GetProgPhaser, ui, false)
+			dump("GetProgPhaser", p)
+			if type(p) == "table" then dump("GetProgPhaser[1]", p[1]) end
+			local ch = try(GetUIChannel, ui)
+			dump("GetUIChannel", ch)
+			local rt = type(ch) == "table" and num(ch.rt_index or ch.rt_channel)
+			if rt then dump("GetRTChannel", try(GetRTChannel, rt)) end
+		end
+	end
+	for _, l in ipairs(out) do Printf("littlelx probe: " .. l) end
+	send("probe", "s", table.concat(out, " / "))
+end
+
 local function report(force)
 	if force then last = {} end
 	local page = CurrentExecPage().index
@@ -181,6 +340,7 @@ local function report(force)
 		local r = resolution(a)
 		if changed("res" .. a, r) then send("res/" .. a, "f", r) end
 	end
+	report_encoders()
 end
 
 -- ---- acting on the command line --------------------------------------
@@ -207,6 +367,10 @@ local function act(arg)
 	if verb == "page" then
 		local n = num(rest)
 		if n and n >= 1 then Cmd("Page " .. math.floor(n)) end
+		return
+	end
+	if verb == "probe" then
+		probe()
 		return
 	end
 	if verb == "res" then
