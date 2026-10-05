@@ -726,8 +726,9 @@ class Screen:
     ENC0 = 66      # encoders page: 10 ids per encoder
     ENC_FEAT, ENC_PAGE = 86, 87
     BACK = 120
-    SET_TITLE, SET_RESET = 121, 122
-    SET0 = 125     # setup grids (keys, functions, digits)
+    SET_TITLE, SET_RESET, SET_MORE = 121, 122, 123
+    SET0 = 125     # setup grids (keys, functions, digits); named values from SET0 + 20
+    # (the Pi has 160 widget ids: keep everything below that)
 
     KEYPAD = [
         ["Fixture", "7", "8", "9", "Thru"],
@@ -747,6 +748,7 @@ class Screen:
         self.reset_armed = 0.0
         self.value_entry = ""
         self.sets_page = 0
+        self.sets_rows = 3
         self.cmdline = ""      # local command line (used when MA isn't linked)
         self.keymap = {}
         self.w, self.h = 320, 480
@@ -1021,16 +1023,19 @@ class Screen:
         if not a:
             return "-"
         now = f"   (now {a[2]})" if a[2] else ""
+        if self.b.ma["sets"].get(a[0].lower()):
+            return f"{a[1]}{now}\nchoose one"
         return f"{a[1]}{now}\n{self.value_entry or ''}_"
 
     def show_sets(self, i):
         """Fill the named-value buttons from the current scroll row."""
         a = self.b.encoder_attr(i)
         sets = self.b.ma["sets"].get(a[0].lower(), []) if a else []
-        last_row = max(0, -(-len(sets) // 3) - 3)
+        rows = self.sets_rows
+        last_row = max(0, -(-len(sets) // 3) - rows)
         self.sets_page = max(0, min(self.sets_page, last_row))  # first row shown
         first = self.sets_page * 3
-        for n in range(9):
+        for n in range(rows * 3):
             wid = self.SET0 + 20 + n
             if wid not in self.state:
                 continue
@@ -1041,8 +1046,8 @@ class Screen:
             else:
                 self.keymap.pop(wid, None)
                 self.setw(wid, text="", colors=(C_BG, C_DIM, C_BG))
-        if self.SET0 + 30 in self.state:
-            self.setw(self.SET0 + 30, text=f"turn the encoder for more   {first + 1}-{min(first + 9, len(sets))}"
+        if self.SET_MORE in self.state:
+            self.setw(self.SET_MORE, text=f"turn the encoder for more   {first + 1}-{min(first + rows * 3, len(sets))}"
                                            f" of {len(sets)}")
 
     def scroll_sets(self, d):
@@ -1077,19 +1082,23 @@ class Screen:
         self.widget(self.SET_TITLE, "L", 4, top, w - 8, 56, "000000", C_CMD, "000000", 1, 0, 0, self.value_title(i))
         y = top + 60
         sets = b.ma["sets"].get(a[0].lower(), []) if a else []
-        if sets:
-            rows = min(3, -(-len(sets) // 3))
-            sw, sh = (w - 4) // 3, 40
+        if sets:  # named values instead of the number pad
+            sh = 48
+            fit = (self.h - 62 - 34 - y) // sh
+            rows = min(fit, -(-len(sets) // 3))
+            self.sets_rows = rows
+            sw = (w - 4) // 3
             for n in range(rows * 3):
                 r, c = divmod(n, 3)
                 self.widget(self.SET0 + 20 + n, "B", 4 + c * sw, y + r * sh, sw - 3, sh - 4, C_KEY2, C_TEXT,
                             C_BTN_ON, 0, 0, 0, "")
             y += rows * sh
-            if len(sets) > 9:  # more than fit: the encoder (or this button) scrolls
-                self.keymap[self.SET0 + 30] = {"setpage": 1, "enc": i}
-                self.widget(self.SET0 + 30, "B", 4, y, w - 8, 30, C_PANEL, C_DIM, C_BTN_ON, 0, 0, 0, "")
-                y += 34
+            if len(sets) > rows * 3:  # more than fit: the encoder (or this button) scrolls
+                self.keymap[self.SET_MORE] = {"setpage": 1, "enc": i}
+                self.widget(self.SET_MORE, "B", 4, y, w - 8, 30, C_PANEL, C_DIM, C_BTN_ON, 0, 0, 0, "")
             self.show_sets(i)
+            self.back_button()
+            return
         bw, bh = (w - 4) // 3, (self.h - 4 - y) // 5
         keys = ["7", "8", "9", "4", "5", "6", "1", "2", "3", ".", "0", "<-"]
         for n, k in enumerate(keys):
@@ -1331,7 +1340,8 @@ class Screen:
         if "setpage" in act:  # tap: next three rows, then back to the top
             a = self.b.encoder_attr(act["enc"])
             n = len(self.b.ma["sets"].get(a[0].lower(), [])) if a else 0
-            self.sets_page = self.sets_page + 3 if (self.sets_page + 3) * 3 < n else 0
+            rows = self.sets_rows
+            self.sets_page = self.sets_page + rows if (self.sets_page + rows) * 3 < n else 0
             self.show_sets(act["enc"])
             return
         if "vkey" in act:
