@@ -1087,7 +1087,7 @@ class Screen:
         self.setup_title(top, "Press a key on the controller\n(or tap it here) to change it")
         hw = self.b.cfg["hw"]["keys"]
         n = max(20, len(hw))
-        cols = 4
+        cols = 5  # like the hardware: rows of five, lined up with the faders
         rows = -(-n // cols)
         gy = top + 44
         bw, bh = (w - 4) // cols, (self.h - 62 - 44 - gy) // rows
@@ -1096,8 +1096,11 @@ class Screen:
             wid = self.SET0 + k
             learnt = k < len(hw) and hw[k]
             self.keymap[wid] = {"edit": k}
+            what = self.describe(self.key_act(k))
+            if self.portrait and what.startswith("Exec "):
+                what = "Ex " + what[5:]  # 5 across is narrow
             self.widget(wid, "B", 4 + c * bw, gy + r * bh, bw - 3, bh - 4, C_BTN if learnt else C_PANEL,
-                        C_TEXT if learnt else C_DIM, C_BTN_ON, 0, 0, 0, f"{k + 1}\n{self.describe(self.key_act(k))}")
+                        C_TEXT if learnt else C_DIM, C_BTN_ON, 0, 0, 0, f"{k + 1}\n{what}")
         self.keymap[self.SET_RESET] = {"reset_keys": True}
         self.widget(self.SET_RESET, "B", 4, self.h - 104, w - 8, 40, C_PANEL, C_DIM, C_BTN_ON, 0, 0, 0,
                     "Set all keys back to defaults")
