@@ -332,7 +332,12 @@ local function value_words(sf, aname, v)
 		sets_cache[key] = sets
 	end
 	for _, set in ipairs(sets) do
-		if x >= set.from - 0.25 and x <= set.to + 0.25 then return set.name end
+		-- like MA: a name only for a real slot; inside an unnamed ("No Feature")
+		-- or wide range (a dimmer's 1..254) the number says more
+		if x >= set.from - 0.25 and x <= set.to + 0.25 then
+			if set.name:lower() == "no feature" or set.to - set.from > 50 then return v end
+			return set.name
+		end
 	end
 	return v
 end
