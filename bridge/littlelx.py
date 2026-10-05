@@ -48,12 +48,19 @@ CONFIG_PATH = os.path.expanduser("~/.littlelx.json")
 #
 # Key / touch-button actions:
 #   {"exec": 201}                 press/release executor key (follows page)
-#   {"cmd": "Go+"}                send a command-line command on press
-#   {"page": 1} / {"page": -1}    page up / down
+#   {"key": "Store"}              a console key: typed into MA's command line
+#                                 ("Please", "Clear" and "<-" act on the line)
+#   {"cmd": "Go+"}                run a command right away
+#   {"page": 1} / {"page": -1}    page up / down (MA's page follows)
 #   {"screen": "keypad"}          switch touchscreen page
+# Touch buttons can also have "state": "highlight"|"lowlight"|"solo"|"blind"
+# to light up while that is active in MA (executor buttons light by themselves).
 # Encoder actions: {"cmd": "... {d} ..."} with {d} = signed step, or {"page": 1}
 
+CONFIG_VERSION = 2
+
 DEFAULTS = {
+    "config_version": CONFIG_VERSION,
     "osc": {
         "host": "127.0.0.1",      # MA3 machine (127.0.0.1 = MA3 onPC on this computer)
         "port": 8000,             # MA3: Menu > In & Out > OSC > Port
@@ -61,33 +68,37 @@ DEFAULTS = {
         "listen_port": 9000,      # MA3 "Send" destination port, for feedback
         "fader_type": "i",        # how faders are sent; --test-faders picks it (see FADER_FORMATS)
     },
+    "ma3": {
+        "auto_install": True,     # put the littlelx code into MA3 over OSC
+        "osc_line": 2,            # MA3 OSC line that SENDS to this computer (port 9000)
+        "tick": 0.1,              # how often MA reports (s)
+    },
     "serial_port": "",            # "" = auto-detect, or e.g. "COM5" / "/dev/cu.usbmodem1101"
     "page": 1,
-    "sync_page_to_ma": False,     # also send "Page N" to MA when paging
-    "pickup": False,              # soft takeover when MA reports fader values
+    "pickup": True,               # soft takeover: a fader acts once it reaches MA's level
     "faders": [{"exec": 201 + i, "name": ""} for i in range(5)],
     "keys": (
         [{"exec": 201 + i} for i in range(5)]          # under the faders
         + [{"exec": 101 + i} for i in range(10)]       # button executors
-        + [{"page": -1}, {"page": 1}, {"cmd": "Clear"}, {"cmd": "Go+"}, {"cmd": "Oops"}]
+        + [{"page": -1}, {"page": 1}, {"key": "Clear"}, {"cmd": "Go+"}, {"cmd": "Oops"}]
     ),
     "encoders": [
-        {"cmd": "Attribute \"Dimmer\" At + {d}", "step": 2, "push": {"cmd": "Clear"}},
+        {"cmd": "Attribute \"Dimmer\" At + {d}", "step": 2, "push": {"key": "Clear"}},
         {"page": 1, "push": {"screen": "keypad"}},
     ],
     "touch_buttons": [
         {"label": "Page -", "page": -1},
         {"label": "Page +", "page": 1},
-        {"label": "Clear", "cmd": "Clear"},
+        {"label": "Clear", "key": "Clear"},
         {"label": "Oops", "cmd": "Oops"},
         {"label": "Keypad", "screen": "keypad"},
         {"label": "Go -", "cmd": "Go-"},
         {"label": "Pause", "cmd": "Pause"},
         {"label": "Go +", "cmd": "Go+", "color": "1f7a3a"},
-        {"label": "Highlight", "cmd": "Highlight"},
-        {"label": "Blackout", "cmd": "Blackout", "color": "7a1f2a"},
-        {"label": "Blind", "cmd": "Blind"},
-        {"label": "Freeze", "cmd": "Freeze"},
+        {"label": "Highlight", "cmd": "Highlight", "state": "highlight"},
+        {"label": "Blind", "cmd": "Blind", "state": "blind"},
+        {"label": "Last", "cmd": "Previous"},
+        {"label": "Next", "cmd": "Next"},
     ],
     # Filled in by --learn
     "hw": {
@@ -110,9 +121,30 @@ def load_config():
                 cfg[k].update(v)
             else:
                 cfg[k] = v
+        if user.get("config_version", 1) < CONFIG_VERSION:
+            migrate(cfg)
+            cfg["config_version"] = CONFIG_VERSION
+            save_config(cfg)
     else:
         save_config(cfg)
     return cfg
+
+
+def migrate(cfg):
+    """Bring a config saved by an older version up to date (runs once)."""
+    labels = [b.get("label") for b in cfg.get("touch_buttons", [])]
+    if "Blackout" in labels or "Freeze" in labels:
+        cfg["touch_buttons"] = copy.deepcopy(DEFAULTS["touch_buttons"])
+        print("Touch buttons updated: Blackout/Freeze replaced by Last/Next; Highlight/Blind light up.")
+    for k in cfg.get("keys", []):
+        if k == {"cmd": "Clear"}:  # Clear now acts on MA's command line first
+            k.pop("cmd")
+            k["key"] = "Clear"
+    for e in cfg.get("encoders", []):
+        if e and e.get("push") == {"cmd": "Clear"}:
+            e["push"] = {"key": "Clear"}
+    cfg.pop("sync_page_to_ma", None)
+    cfg["pickup"] = True  # old default was off; soft takeover is now on
 
 
 def save_config(cfg):
@@ -455,7 +487,7 @@ def sync_setup(cfg, ser):
 
 C_BG, C_PANEL, C_TEXT, C_DIM = "101418", "1c2430", "ffffff", "8899aa"
 C_BTN, C_BTN_ON, C_BAR, C_BAR_BG = "2c3546", "c08a1e", "2f7de1", "232b38"
-C_KEY2, C_OK = "3a4458", "38c172"
+C_KEY2, C_OK, C_WAIT, C_CMD = "3a4458", "38c172", "5a6578", "ffd36b"
 
 
 def esc(text):
@@ -464,7 +496,11 @@ def esc(text):
 
 class Screen:
     """Builds the touchscreen pages out of Pi widgets. Adapts to portrait or
-    landscape using the size the panel reports in its HELLO."""
+    landscape using the size the panel reports in its HELLO.
+
+    Every widget's current state is kept here, so the whole screen can be
+    re-sent bit by bit in the background: anything lost on the serial link
+    reappears within a few seconds."""
     HDR_PAGE, HDR_MID, HDR_STATUS = 0, 1, 2
     FADER0 = 10
     BTN0 = 20
@@ -482,9 +518,12 @@ class Screen:
     def __init__(self, bridge):
         self.b = bridge
         self.name = "main"
-        self.cmdline = ""
+        self.cmdline = ""      # local command line (used when MA isn't linked)
         self.keymap = {}
         self.w, self.h = 320, 480
+        self.state = {}        # wid -> widget fields
+        self.refresh_ids = []
+        self.refresh_i = 0
 
     @property
     def portrait(self):
@@ -493,32 +532,93 @@ class Screen:
     def send(self, line):
         self.b.to_pi(line)
 
-    def widget(self, wid, kind, x, y, w, h, bg, fg, ac, font, align, value, text):
-        self.send(f"W {wid} {kind} {x} {y} {w} {h} {bg} {fg} {ac} {font} {align} {value} {esc(text)}")
+    # ---- widget state
+    @staticmethod
+    def wline(wid, s):
+        return (f"W {wid} {s['kind']} {s['x']} {s['y']} {s['w']} {s['h']} {s['bg']} {s['fg']} {s['ac']} "
+                f"{s['font']} {s['align']} {s['value']} {esc(s['text'])}")
 
+    def widget(self, wid, kind, x, y, w, h, bg, fg, ac, font, align, value, text, marker=-1):
+        s = dict(kind=kind, x=x, y=y, w=w, h=h, bg=bg, fg=fg, ac=ac, font=font, align=align,
+                 value=value, text=text, marker=marker)
+        self.state[wid] = s
+        self.send(self.wline(wid, s))
+        if marker >= 0:
+            self.send(f"M {wid} {marker}")
+
+    def setw(self, wid, value=None, text=None, colors=None, marker=None):
+        s = self.state.get(wid)
+        if not s:
+            return
+        if value is not None and value != s["value"]:
+            s["value"] = value
+            self.send(f"V {wid} {value}")
+        if text is not None and text != s["text"]:
+            s["text"] = text
+            self.send(f"T {wid} {esc(text)}")
+        if colors is not None and tuple(colors) != (s["bg"], s["fg"], s["ac"]):
+            s["bg"], s["fg"], s["ac"] = colors
+            self.send(f"C {wid} {s['bg']} {s['fg']} {s['ac']}")
+        if marker is not None and marker != s["marker"]:
+            s["marker"] = marker
+            self.send(f"M {wid} {marker}")
+
+    def refresh_step(self):
+        """Re-send one widget (round robin). Identical redraws cost nothing on the Pi."""
+        if not self.refresh_ids:
+            self.refresh_ids = sorted(self.state)
+            self.refresh_i = 0
+        if not self.refresh_ids:
+            return
+        wid = self.refresh_ids[self.refresh_i % len(self.refresh_ids)]
+        self.refresh_i += 1
+        if self.refresh_i >= len(self.refresh_ids):
+            self.refresh_ids = []
+        s = self.state.get(wid)
+        if s:
+            self.send(self.wline(wid, s))
+            if s["marker"] >= 0:
+                self.send(f"M {wid} {s['marker']}")
+
+    # ---- layout
     def header_h(self):
         return 54 if self.portrait else 30
 
+    def mid_text(self):
+        b = self.b
+        if b.ma_linked():
+            line = b.ma["busy"] or b.ma["cmdline"]
+            return "> " + line if line else ">"
+        return b.last_cmd
+
     def header(self):
         w = self.w
+        page = f"Page {self.b.page}"
         if self.portrait:
-            self.widget(self.HDR_PAGE, "L", 0, 0, w // 2, 30, C_PANEL, C_TEXT, C_PANEL, 1, 1, 0,
-                        f"Page {self.b.page}")
-            self.widget(self.HDR_MID, "L", 0, 30, w, 24, C_PANEL, C_DIM, C_PANEL, 0, 1, 0, self.b.last_cmd)
+            self.widget(self.HDR_PAGE, "L", 0, 0, w // 2, 30, C_PANEL, C_TEXT, C_PANEL, 1, 1, 0, page)
+            self.widget(self.HDR_MID, "L", 0, 30, w, 24, C_PANEL, C_CMD, C_PANEL, 0, 1, 0, self.mid_text())
         else:
-            self.widget(self.HDR_PAGE, "L", 0, 0, 120, 30, C_PANEL, C_TEXT, C_PANEL, 1, 1, 0,
-                        f"Page {self.b.page}")
-            self.widget(self.HDR_MID, "L", 120, 0, w - 260, 30, C_PANEL, C_DIM, C_PANEL, 0, 0, 0,
-                        self.b.last_cmd)
-        self.status()
-
-    def status(self):
-        ok = self.b.ma_seen and time.time() - self.b.ma_seen < 5
+            self.widget(self.HDR_PAGE, "L", 0, 0, 120, 30, C_PANEL, C_TEXT, C_PANEL, 1, 1, 0, page)
+            self.widget(self.HDR_MID, "L", 120, 0, w - 260, 30, C_PANEL, C_CMD, C_PANEL, 0, 0, 0, self.mid_text())
         x = self.w // 2 if self.portrait else self.w - 140
-        self.widget(self.HDR_STATUS, "L", x, 0, self.w - x, 30, C_PANEL, C_OK if ok else C_DIM, C_PANEL,
-                    0, 2, 0, "MA3 online" if ok else f"OSC > {self.b.cfg['osc']['host']}")
+        self.widget(self.HDR_STATUS, "L", x, 0, self.w - x, 30, C_PANEL, C_DIM, C_PANEL, 0, 2, 0, "")
+        self.update_header()
+
+    def update_header(self):
+        b = self.b
+        if b.ma_linked():
+            text, color = "MA3 linked", C_OK
+        elif b.ma_seen and time.time() - b.ma_seen < 5:
+            text, color = "MA3 online", C_OK
+        else:
+            text, color = f"OSC > {b.cfg['osc']['host']}", C_DIM
+        self.setw(self.HDR_STATUS, text=text, colors=(C_PANEL, color, C_PANEL))
+        self.setw(self.HDR_PAGE, text=f"Page {b.page}")
+        self.setw(self.HDR_MID, text=self.mid_text())
 
     def draw(self):
+        self.state = {}
+        self.refresh_ids = []
         self.send("CLR")
         self.send(f"BG {C_BG}")
         self.header()
@@ -534,7 +634,8 @@ class Screen:
         fw = (w - 4) // 5
         for i in range(5):
             self.widget(self.FADER0 + i, "v", 4 + i * fw, top, fw - 3, fh, C_BAR_BG, C_TEXT, C_BAR,
-                        0, 0, self.fader_value(i), self.fader_text(i))
+                        0, 0, 0, "")
+            self.update_fader(i)
         cols = 3 if self.portrait else 5
         rows = 4 if self.portrait else 2
         btns = self.b.cfg["touch_buttons"][:cols * rows]
@@ -547,52 +648,72 @@ class Screen:
             wid = self.BTN0 + n
             self.keymap[wid] = btn
             self.widget(wid, "B", 4 + c * bw, by + r * bh, bw - 3, bh - 6, btn.get("color", C_BTN),
-                        C_TEXT, C_BTN_ON, 1, 0, 0, btn.get("label", "?"))
+                        C_TEXT, C_BTN_ON, 1, 0, self.button_lit(btn), btn.get("label", "?"))
 
     def draw_keypad(self):
         w, h = self.w, self.h
         top = self.header_h() + 4
         self.keymap = {}
-        self.widget(self.CMDLINE, "L", 4, top, w - 8, 40, "000000", "ffd36b", "000000", 1, 1, 0,
-                    self.cmdline + "_")
+        self.widget(self.CMDLINE, "L", 4, top, w - 8, 40, "000000", C_CMD, "000000", 1, 1, 0,
+                    self.keypad_text())
         ky = top + 44
         bw = (w - 4) // 5
         bh = (h - ky - 2) // 5
         for r, row in enumerate(self.KEYPAD):
             for c, label in enumerate(row):
                 wid = self.KEY0 + r * 5 + c
-                self.keymap[wid] = {"key": label}
+                self.keymap[wid] = {"keypad": label}
                 digit = label.isdigit() or label == "."
                 color = C_BTN_ON if label == "Please" else C_BTN if digit else C_KEY2
                 font = 0 if self.portrait and len(label) > 3 else 1
                 self.widget(wid, "B", 4 + c * bw, ky + r * bh, bw - 3, bh - 4, color, C_TEXT, C_BTN_ON,
                             font, 0, 0, label)
 
-    def fader_value(self, i):
-        v = self.b.fader_pos[i]
-        return int(v * 10) if v is not None else 0
+    # ---- live updates
+    def button_lit(self, btn):
+        ma = self.b.ma
+        if "state" in btn:
+            return 1 if ma["master"].get(btn["state"].lower()) else 0
+        if "exec" in btn:
+            return 1 if ma["run"].get(btn["exec"]) else 0
+        return 0
 
-    def fader_text(self, i):
-        f = self.b.cfg["faders"][i]
-        default = str(f["exec"]) if self.portrait else f"Exec {f['exec']}"
-        name = self.b.ma_names.get((self.b.page, f["exec"])) or f.get("name") or default
-        if self.portrait:
-            name = name[:7]
-        v = self.b.fader_pos[i]
-        pct = "--" if v is None else f"{round(v)}%"
-        hint = ""
-        if self.b.pickup_pending[i] is not None:
-            hint = " ^" if self.b.pickup_pending[i] > (v or 0) else " v"
-        return f"{name}\n{pct}{hint}"
+    def update_buttons(self):
+        if self.name != "main":
+            return
+        for wid, btn in self.keymap.items():
+            self.setw(wid, value=self.button_lit(btn))
 
     def update_fader(self, i):
-        if self.name == "main":
-            self.send(f"V {self.FADER0 + i} {self.fader_value(i)}")
-            self.send(f"T {self.FADER0 + i} {esc(self.fader_text(i))}")
+        """Bar = MA's real level (when known), marker = the physical fader."""
+        if self.name != "main" or (self.FADER0 + i) not in self.state:
+            return
+        b = self.b
+        f = b.cfg["faders"][i]
+        ma = b.ma_fader(i)
+        pos = b.fader_pos[i]
+        shown = ma if ma is not None else pos
+        name = b.ma["name"].get(f["exec"]) if b.ma_linked() else None
+        name = name or f.get("name") or (str(f["exec"]) if self.portrait else f"Exec {f['exec']}")
+        if self.portrait:
+            name = name[:7]
+        text = f"{name}\n" + ("--" if shown is None else f"{round(shown)}%")
+        waiting = ma is not None and pos is not None and not b.picked[i]
+        if waiting:
+            text += "\n" + ("^ ^ ^" if pos < ma else "v v v")
+        marker = int(pos * 10) if (ma is not None and pos is not None) else -1
+        self.setw(self.FADER0 + i, value=int((shown or 0) * 10), text=text, marker=marker,
+                  colors=(C_BAR_BG, C_CMD if waiting else C_TEXT, C_WAIT if waiting else C_BAR))
+
+    def keypad_text(self):
+        if self.b.ma_linked():
+            return (self.b.ma["busy"] or self.b.ma["cmdline"]) + "_"
+        return self.cmdline + "_"
 
     def update_cmdline(self):
+        self.setw(self.HDR_MID, text=self.mid_text())
         if self.name == "keypad":
-            self.send(f"T {self.CMDLINE} {esc(self.cmdline + '_')}")
+            self.setw(self.CMDLINE, text=self.keypad_text())
 
     def set_screen(self, name):
         self.name = name
@@ -602,20 +723,21 @@ class Screen:
         act = self.keymap.get(wid)
         if not act:
             return
-        if "key" in act:
-            self.keypad(act["key"])
+        if "keypad" in act:
+            if act["keypad"] == "Back":
+                self.set_screen("main")
+            else:
+                self.b.ma_key(act["keypad"])
         else:
             self.b.do_action(act, True)
 
     def on_release(self, wid):
         act = self.keymap.get(wid)
-        if act and "key" not in act:
+        if act and "keypad" not in act:
             self.b.do_action(act, False)
 
-    def keypad(self, k):
-        if k == "Back":
-            self.set_screen("main")
-            return
+    def local_key(self, k):
+        """Command line kept here when MA isn't linked (sent on Please)."""
         if k == "<-":
             self.cmdline = self.cmdline.rstrip()
             self.cmdline = self.cmdline[:self.cmdline.rfind(" ") + 1] if " " in self.cmdline else ""
@@ -657,7 +779,15 @@ class Encoder:
         return detents
 
 
+def resource(*parts):
+    """A file shipped with the bridge (also inside the Windows .exe)."""
+    base = getattr(sys, "_MEIPASS", os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+    return os.path.join(base, *parts)
+
+
 class Bridge:
+    PI_TX_RATE = 20000   # bytes/s to the touchscreen, well under what the Mega relays
+
     def __init__(self, cfg):
         self.cfg = cfg
         self.page = cfg.get("page", 1)
@@ -665,17 +795,21 @@ class Bridge:
         self.screen = Screen(self)
         self.fader_pos = [None] * 5          # physical position 0..100
         self.fader_sent = [None] * 5
-        self.pickup_pending = [None] * 5     # MA value we wait to cross
+        self.picked = [True] * 5             # physical fader is in control (soft takeover)
         self.fader_cmd_at = [0.0] * 5
         self.fader_cmd_pending = [None] * 5
         self.verbose = False
-        self.ma_values = {}                  # (page, exec) -> 0..100
-        self.ma_names = {}
+        self.ma = dict(alive=0.0, page=None, fader={}, run={}, name={}, master={}, cmdline="",
+                       busy="", busy_at=0.0)
+        self.ma_values = {}                  # (page, exec) -> 0..100 from plain OSC feedback
         self.ma_seen = 0
+        self.ma_installed_at = 0.0
         self.last_cmd = ""
         self.pins = {}
         self.encs = []
         self.pi_ready = False
+        self.pi_proto = 0
+        self.tx_free_at = 0.0
         self.build_maps()
 
         o = cfg["osc"]
@@ -723,6 +857,17 @@ class Bridge:
                 elif e.get("push") is not None:
                     self.digital[e["push"]] = ("enc", i, "push")
 
+    # ---- MA state
+    def ma_linked(self):
+        return time.time() - self.ma["alive"] < 6
+
+    def ma_fader(self, i):
+        """MA's real level for fader i on the current page, if known."""
+        ex = self.cfg["faders"][i]["exec"]
+        if self.ma_linked():
+            return self.ma["fader"].get(ex)
+        return self.ma_values.get((self.page, ex))
+
     # ---- output
     def osc(self, addr, *args):
         try:
@@ -735,14 +880,64 @@ class Bridge:
         self.last_cmd = cmd
         print(f"cmd: {cmd}")
         if self.pi_ready:
-            self.to_pi(f"T {Screen.HDR_MID} {esc(cmd)}")
+            self.screen.update_cmdline()
+
+    def ma_plugin(self, arg):
+        """Run an action in the littlelx code installed in MA (see ma3/littlelx.lua)."""
+        arg = re.sub(r"[^A-Za-z0-9 .+\-_<>/]", "", arg)
+        self.osc("/cmd", "Lua \"local c=GetVar(GlobalVars(),'llx_code') "
+                         f"if c then load(c)()(nil,'{arg}') end\"")
+        if self.verbose:
+            print(f"MA: {arg}")
+
+    def ma_key(self, k):
+        """A console key: typed into MA's real command line when linked."""
+        if not self.ma_linked():
+            self.screen.local_key(k)
+            return
+        verb = {"Please": "please", "Clear": "clear", "<-": "back"}.get(k)
+        self.ma_plugin(verb or f"type {k}")
+
+    def install_ma3(self):
+        """Put the littlelx code into MA3 over OSC and start it (no import needed)."""
+        try:
+            src = open(resource("ma3", "littlelx.lua"), "rb").read()
+        except OSError as e:
+            print(f"Can't find the MA3 code to install ({e})")
+            return
+        conf = self.cfg.get("ma3", {})
+        line, tick = int(conf.get("osc_line", 2)), float(conf.get("tick", 0.1))
+        print(f"Installing littlelx into MA3 (it reports back on OSC line {line})...")
+        self.ma_installed_at = time.time()
+        put = "Lua \"SetVar(GlobalVars(),'llx_src',GetVar(GlobalVars(),'llx_src')..'{}')\""
+        self.osc("/cmd", "Lua \"SetVar(GlobalVars(),'llx_src','')\"")
+        h = src.hex()
+        for off in range(0, len(h), 240):
+            time.sleep(0.01)
+            self.osc("/cmd", put.format(h[off:off + 240]))
+        time.sleep(0.05)
+        self.osc("/cmd", "Lua \"local h=GetVar(GlobalVars(),'llx_src') "
+                         "local c=h:gsub('..',function(x) return string.char(tonumber(x,16)) end) "
+                         "SetVar(GlobalVars(),'llx_code',c) "
+                         f"load(c)()(nil,'__start {line} {tick}')\"")
 
     def to_pi(self, line):
-        if self.ser:
-            try:
-                self.ser.send(">" + line)
-            except Exception:
-                pass  # reader thread reports the disconnect
+        if not self.ser:
+            return
+        if self.pi_proto >= 3:  # checksum: the Pi drops lines damaged on the way
+            x = 0
+            for c in line.encode(errors="replace"):
+                x ^= c
+            line = f"{line}*{x:02X}"
+        # pace the output so the Mega's small serial buffers can't overflow
+        now = time.time()
+        self.tx_free_at = max(now, self.tx_free_at) + (len(line) + 2) / self.PI_TX_RATE
+        if self.tx_free_at - now > 0.05:
+            time.sleep(self.tx_free_at - now - 0.05)
+        try:
+            self.ser.send(">" + line)
+        except Exception:
+            pass  # reader thread reports the disconnect
 
     def send_fader(self, i, value):
         fmt = self.cfg["osc"].get("fader_type", "i")
@@ -753,6 +948,7 @@ class Bridge:
                 return
             self.fader_cmd_at[i] = now
             self.fader_cmd_pending[i] = None
+        self.fader_sent[i] = value
         addr, arg = fader_message(fmt, self.page, self.cfg["faders"][i]["exec"], value)
         self.osc(addr, arg)
         if self.verbose:
@@ -768,6 +964,8 @@ class Bridge:
             self.osc(f"/Page{self.page}/Key{act['exec']}", 1 if down else 0)
         elif not down:
             return
+        elif "key" in act:
+            self.ma_key(act["key"])
         elif "cmd" in act:
             self.ma_cmd(act["cmd"])
         elif "page" in act:
@@ -775,37 +973,41 @@ class Bridge:
         elif "screen" in act:
             self.screen.set_screen(act["screen"] if self.screen.name != act["screen"] else "main")
 
-    def set_page(self, page):
-        self.page = max(1, page)
-        self.cfg["page"] = self.page
-        if self.cfg.get("sync_page_to_ma"):
-            self.ma_cmd(f"Page {self.page}")
-        for i in range(5):
-            self.arm_pickup(i)
+    def set_page(self, page, from_ma=False):
+        page = max(1, page)
+        if not from_ma:
+            self.osc("/cmd", f"Page {page}")  # MA follows; the plugin confirms
+        if page == self.page:
+            return
+        self.page = page
+        self.cfg["page"] = page
+        self.ma["fader"], self.ma["run"], self.ma["name"] = {}, {}, {}
+        for i in range(5):  # new page: catch each fader again before it takes over
+            self.picked[i] = not self.cfg.get("pickup", True)
         if self.pi_ready:
-            self.screen.header()
+            self.screen.update_header()
+            self.screen.update_buttons()
             for i in range(5):
                 self.screen.update_fader(i)
-
-    def arm_pickup(self, i):
-        ma = self.ma_values.get((self.page, self.cfg["faders"][i]["exec"]))
-        pos = self.fader_pos[i]
-        if self.cfg.get("pickup") and ma is not None and pos is not None and abs(ma - pos) > 3:
-            self.pickup_pending[i] = ma
-        else:
-            self.pickup_pending[i] = None
 
     # ---- input from the Mega
     def on_fader(self, i, value):
         prev = self.fader_pos[i]
         self.fader_pos[i] = value
-        target = self.pickup_pending[i]
-        if target is not None:
-            crossed = prev is not None and (prev - target) * (value - target) <= 0
-            if crossed or abs(value - target) <= 2:
-                self.pickup_pending[i] = None
-        if self.pickup_pending[i] is None and (self.fader_sent[i] is None or round(value) != round(self.fader_sent[i])):
-            self.fader_sent[i] = value
+        if prev is None:
+            # First reading after connecting: only note where the fader is.
+            # Sending it would yank MA's executor to wherever the knob sits.
+            if self.pi_ready:
+                self.screen.update_fader(i)
+            return
+        ma = self.ma_fader(i)
+        if not self.picked[i]:
+            if ma is None or not self.cfg.get("pickup", True):
+                self.picked[i] = True
+            else:  # soft takeover: take control once the fader reaches MA's level
+                crossed = prev is not None and (prev - ma) * (value - ma) <= 0
+                self.picked[i] = crossed or abs(value - ma) <= 2
+        if self.picked[i] and (self.fader_sent[i] is None or round(value) != round(self.fader_sent[i])):
             self.send_fader(i, value)
         if self.pi_ready:
             self.screen.update_fader(i)
@@ -881,8 +1083,12 @@ class Bridge:
         if parts[0] == "HELLO":
             if len(parts) >= 5:
                 self.screen.w, self.screen.h = int(parts[3]), int(parts[4])
+            self.pi_proto = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 1
             ver = parts[5] if len(parts) > 5 else "old"
             print(f"Touchscreen connected ({self.screen.w}x{self.screen.h}, firmware {ver})")
+            if self.pi_proto < 3:
+                print("  Touchscreen firmware is out of date (no fader markers, unchecked link):"
+                      " update it with --update-pi")
             self.pi_ready = True
             cal = self.cfg.get("touch_cal")
             if cal:
@@ -898,11 +1104,9 @@ class Bridge:
             self.screen.on_release(int(parts[1]))
         elif parts[0] == "S" and len(parts) > 2:
             i = int(parts[1]) - Screen.FADER0
-            if 0 <= i < 5:
-                v = int(parts[2]) / 10.0
-                self.fader_sent[i] = v
-                self.send_fader(i, v)
-                self.fader_pos[i] = v
+            if 0 <= i < 5:  # dragging a fader on the screen sets MA directly
+                self.send_fader(i, int(parts[2]) / 10.0)
+                self.picked[i] = False  # the physical fader catches it again
                 self.screen.update_fader(i)
         elif parts[0] == "CALD":
             self.cfg["touch_cal"] = [float(x) for x in parts[1:7]]
@@ -914,25 +1118,78 @@ class Bridge:
     # ---- MA feedback
     def on_osc(self, addr, args):
         self.ma_seen = time.time()
-        m = re.search(r"/Page(\d+)/Fader(\d+)$", addr)
+        if "/littlelx/" in addr:
+            self.on_littlelx(addr.split("/littlelx/", 1)[1], args)
+            return
+        m = re.search(r"/Page(\d+)/Fader(\d+)$", addr)  # plain MA OSC feedback
         if not m:
             return
         page, ex = int(m.group(1)), int(m.group(2))
         nums = [a for a in args if isinstance(a, (int, float)) and not isinstance(a, bool)]
-        strs = [a for a in args if isinstance(a, str)]
         if nums:
             self.ma_values[(page, ex)] = float(nums[-1])
-        names = [s for s in strs if s not in ("FaderMaster", "FaderX", "FaderTemp")]
-        if names:
-            self.ma_names[(page, ex)] = names[0][:12]
         if page == self.page and self.pi_ready:
             for i, f in enumerate(self.cfg["faders"]):
                 if f["exec"] == ex:
                     self.screen.update_fader(i)
 
+    def on_littlelx(self, what, args):
+        """State reported by the code running inside MA3."""
+        ma = self.ma
+        val = args[0] if args else None
+        was_linked = self.ma_linked()
+        ma["alive"] = time.time()
+        if not was_linked:
+            print("MA3 linked: page, faders, key states and command line follow MA.")
+        scr = self.screen if self.pi_ready else None
+        if what == "page" and isinstance(val, int):
+            self.set_page(val, from_ma=True)
+        elif what.startswith(("fader/", "run/", "name/")):
+            kind, ex = what.split("/", 1)
+            ex = int(ex)
+            if kind == "fader":
+                v = float(val)
+                ma["fader"][ex] = v
+                for i, f in enumerate(self.cfg["faders"]):
+                    if f["exec"] == ex:
+                        sent = self.fader_sent[i]
+                        # moved in MA by someone else: the physical fader must catch it
+                        if self.picked[i] and self.fader_pos[i] is not None and abs(v - self.fader_pos[i]) > 3 \
+                                and (sent is None or abs(v - sent) > 1.5):
+                            self.picked[i] = not self.cfg.get("pickup", True)
+                        if scr:
+                            scr.update_fader(i)
+            elif kind == "run":
+                ma["run"][ex] = int(val or 0)
+                if scr:
+                    scr.update_buttons()
+            else:
+                ma["name"][ex] = str(val or "")
+                for i, f in enumerate(self.cfg["faders"]):
+                    if f["exec"] == ex and scr:
+                        scr.update_fader(i)
+        elif what.startswith("master/"):
+            ma["master"][what.split("/", 1)[1].lower()] = int(val or 0)
+            if scr:
+                scr.update_buttons()
+        elif what == "cmdline":
+            ma["cmdline"] = str(val or "")
+            ma["busy"] = ""
+            if scr:
+                scr.update_cmdline()
+        elif what == "busy":
+            ma["busy"], ma["busy_at"] = str(val or ""), time.time()
+            if scr:
+                scr.update_cmdline()
+        elif what == "started":
+            print(f"MA3 code running (update every {val} s).")
+        if scr and not was_linked:
+            scr.update_header()
+
     # ---- main loop
     def run(self):
-        last_ping = last_status = 0
+        last_ping = last_status = last_refresh = 0
+        started = time.time()
         while True:
             self.ser = connect(self.cfg)
             self.pi_ready = False
@@ -949,7 +1206,7 @@ class Bridge:
             self.to_pi("?")
             while True:
                 try:
-                    kind, src, data = events.get(timeout=0.1)
+                    kind, src, data = events.get(timeout=0.05)
                 except queue.Empty:
                     kind = None
                 if kind == "mega" and src is self.ser:
@@ -964,12 +1221,22 @@ class Bridge:
                     break
                 now = time.time()
                 self.flush_faders()
+                if (self.cfg.get("ma3", {}).get("auto_install", True) and not self.ma_linked()
+                        and now - started > 4 and now - self.ma_installed_at > 30):
+                    self.install_ma3()
+                if self.ma["busy"] and now - self.ma["busy_at"] > 3:
+                    self.ma["busy"] = ""
+                    if self.pi_ready:
+                        self.screen.update_cmdline()
                 if now - last_ping > 1:
                     last_ping = now
                     self.to_pi("PING")
-                if now - last_status > 2 and self.pi_ready:
+                if self.pi_ready and now - last_status > 1:
                     last_status = now
-                    self.screen.status()
+                    self.screen.update_header()
+                if self.pi_ready and now - last_refresh > 0.1:
+                    last_refresh = now
+                    self.screen.refresh_step()
 
 
 # ------------------------------------------------------------------- tools

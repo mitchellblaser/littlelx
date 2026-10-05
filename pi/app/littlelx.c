@@ -21,13 +21,17 @@
  *     V id value                          set value
  *     T id text...                        set text
  *     C id bg fg ac                       set colours
+ *     M id value                          marker line on a bar (0..1000, -1 none),
+ *                                         e.g. where the physical fader is
+ *   Any line may end in "*hh": XOR of all bytes before the '*', as two hex
+ *   digits. Lines whose checksum doesn't match are dropped.
  *     D id                                delete widget
  *     K a b c d e f                       touch calibration: x=a*rx+b*ry+c, y=d*rx+e*ry+f
  *     CAL                                 run touch calibration on the panel
  *     UPD ...                             firmware update, see "update" below
  *
  *   panel -> computer
- *     HELLO littlelx-pi 2 <w> <h> <version>
+ *     HELLO littlelx-pi 3 <w> <h> <version>   (3 = protocol version)
  *     INFO fb=<ok|missing> touch=<ok|missing>   (right after each HELLO)
  *     P id / R id                         button press / release
  *     S id value                          bar dragged to value
@@ -78,6 +82,7 @@ typedef struct {
 	int x, y, w, h;
 	uint32_t bg, fg, ac;
 	int font, align, value;
+	int marker; /* -1 = none, else 0..1000 along the bar */
 	int pressed;
 	char text[TEXTMAX];
 } widget_t;
@@ -298,6 +303,13 @@ static void draw_widget(widget_t *w)
 		fill_round(w->x, w->y, w->w, w->h, w->pressed ? mix(w->ac, 0xffffff, 80) : w->ac);
 		clip = saved;
 		draw_text_box(w->x, w->y, w->w, w->h, w->font, w->align, w->fg, w->text);
+		if (w->marker >= 0) { /* e.g. the physical fader position */
+			int my = w->y + w->h - w->h * w->marker / 1000;
+			if (my > w->y + w->h - 3)
+				my = w->y + w->h - 3;
+			fill(w->x, my - 1, w->w, 4, 0x000000);
+			fill(w->x + 2, my, w->w - 4, 2, w->fg);
+		}
 		break;
 	}
 	case 'H': case 'h': {
@@ -309,6 +321,13 @@ static void draw_widget(widget_t *w)
 		fill_round(w->x, w->y, w->w, w->h, w->pressed ? mix(w->ac, 0xffffff, 80) : w->ac);
 		clip = saved;
 		draw_text_box(w->x, w->y, w->w, w->h, w->font, w->align, w->fg, w->text);
+		if (w->marker >= 0) {
+			int mx = w->x + w->w * w->marker / 1000;
+			if (mx > w->x + w->w - 3)
+				mx = w->x + w->w - 3;
+			fill(mx - 1, w->y, 4, w->h, 0x000000);
+			fill(mx, w->y + 2, 2, w->h - 4, w->fg);
+		}
 		break;
 	}
 	}
@@ -816,10 +835,30 @@ static void upd_line(char *args)
 	}
 }
 
+/* Lines may end in "*hh" (XOR of the bytes before '*'). Returns 0 = drop. */
+static int checksum_ok(char *line)
+{
+	size_t n = strlen(line);
+	if (n < 3 || line[n - 3] != '*')
+		return 1; /* no checksum (older bridge): accept */
+	char *end;
+	unsigned long want = strtoul(line + n - 2, &end, 16);
+	if (*end)
+		return 1;
+	uint8_t x = 0;
+	for (size_t i = 0; i < n - 3; i++)
+		x ^= (uint8_t)line[i];
+	line[n - 3] = 0;
+	return x == want;
+}
+
 static void handle_line(char *line)
 {
 	char *f[12];
 	widget_t *w;
+
+	if (!checksum_ok(line))
+		return; /* damaged on the way: the bridge re-sends everything regularly */
 
 	last_rx = now_ms();
 	set_online(1);
@@ -845,6 +884,8 @@ static void handle_line(char *line)
 			return;
 		if (w->used)
 			mark_w(w);
+		else
+			w->marker = -1;
 		w->used = 1;
 		w->kind = f[1][0];
 		w->x = atoi(f[2]); w->y = atoi(f[3]); w->w = atoi(f[4]); w->h = atoi(f[5]);
@@ -876,6 +917,15 @@ static void handle_line(char *line)
 		if ((w = get_w(f[0])) && w->used) {
 			w->bg = hex(f[1]); w->fg = hex(f[2]); w->ac = hex(f[3]);
 			mark_w(w);
+		}
+	} else if (line[0] == 'M' && line[1] == ' ') {
+		fields(line + 2, f, 2);
+		if ((w = get_w(f[0])) && w->used) {
+			int m = atoi(f[1]);
+			if (m != w->marker) {
+				w->marker = m;
+				mark_w(w);
+			}
 		}
 	} else if (line[0] == 'D' && line[1] == ' ') {
 		if ((w = get_w(line + 2)) && w->used) {
@@ -1245,7 +1295,7 @@ static int app(void)
 
 static void send_hello(void)
 {
-	send_line("HELLO littlelx-pi 2 %d %d %s", W, H, LLX_VERSION);
+	send_line("HELLO littlelx-pi 3 %d %d %s", W, H, LLX_VERSION);
 	send_line("INFO fb=%s touch=%s", fbmem ? "ok" : "missing", touch >= 0 ? "ok" : "missing");
 }
 

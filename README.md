@@ -164,8 +164,35 @@ python3 bridge/littlelx.py --calibrate    # Windows: littlelx.exe --calibrate
 runs on another machine, set `"host"` in `~/.littlelx.json` to its IP address
 (on Windows, allow the bridge through the firewall when asked).
 
-*Optional, for feedback (executor names/levels and the "MA3 online" indicator):*
-add an OSC line with **Send** = Yes pointing at the bridge computer on port `9000`.
+Then add a **second** OSC line so MA can talk back. Set **Destination IP** to
+the bridge computer (`127.0.0.1` if MA3 onPC runs on the same computer), the
+port to `9000`, and **Send** = Yes. If it isn't line **2**, set
+`"ma3": {"osc_line": N}` in `~/.littlelx.json`.
+
+That's all. **The bridge installs its own code into MA3 over OSC** (no plugin to
+import) and starts it, and it reinstalls it by itself after MA restarts or loads
+a show. The screen shows **MA3 linked** when it's running. (`ma3/littlelx.lua`
+can also be imported as a normal plugin if you prefer; tap it to start or stop.)
+
+### What the MA3 link gives you
+
+* **Page follows MA.** Change page in MA and the controller follows. Page
+  buttons and the encoder change MA's page.
+* **Fader target / actual.** Each screen fader shows **MA's real level** as the
+  bar and **your physical fader** as a line. Until your fader reaches MA's
+  level, the bar turns grey and shows `^ ^ ^` / `v v v` (which way to move). It
+  only takes control once it crosses MA's level (soft takeover), so paging, or
+  someone moving the fader in MA, never makes levels jump. Set `"pickup": false`
+  to turn soft takeover off.
+* **Status keys.** Highlight and Blind light up while they're on in MA, and
+  executor buttons light up while running. Any touch button can light up for
+  `"state": "highlight" | "lowlight" | "solo" | "blind"`.
+* **MA's real command line.** The keypad and `{"key": …}` buttons type into MA's
+  own command line, exactly like pressing the console keys, and the screen shows
+  MA's actual command line back. What you see is always MA's syntax. (MA won't
+  accept typing while a popup is open on its screen; the controller says so.)
+* Without the link (e.g. no second OSC line), everything still works as
+  before: commands are built on the controller and sent on Please.
 
 ### 7. Run it
 
@@ -211,12 +238,12 @@ letter.
 | Keys 18 / 19 / 20 | Clear / Go+ / Oops |
 | Encoder 1 | `Attribute "Dimmer" At ± 2`; push = Clear |
 | Encoder 2 | Page −/+; push = Keypad screen |
-| Touchscreen | Fader levels and names (draggable), 12 command buttons, a full command keypad |
+| Touchscreen | MA fader levels + physical position, names; Page −/+, Clear, Oops, Keypad, Go −, Pause, Go +, Highlight, Blind, Last, Next; a full command keypad |
 
-Actions are one of `{"exec": 201}`, `{"cmd": "Go+"}`, `{"page": 1}` or
-`{"screen": "keypad"}`. Encoder commands use `{d}` for the step. Set `"pickup": true`
-for soft takeover when MA3 reports fader values (useful when paging). Set
-`"fader_type": "f"` if your MA3 version wants float fader values.
+Actions are one of `{"exec": 201}`, `{"key": "Store"}` (a console key typed into
+MA's command line; `"Please"`, `"Clear"` and `"<-"` act on the line), `{"cmd": "Go+"}`
+(a command run right away), `{"page": 1}` or `{"screen": "keypad"}`. Encoder
+commands use `{d}` for the step.
 
 **Faders not moving in MA3?** MA3 versions differ in the fader message they
 accept. Run `littlelx.py --test-faders`: it moves executor 201 using each known
@@ -250,5 +277,8 @@ renders a list of protocol lines to an image. To boot-test the image in QEMU
 
 * Mega ⇄ bridge: see the header of `mega/littlelx_mega/littlelx_mega.ino`
 * Pi ⇄ bridge (tunnelled through the Mega as lines starting with `>`): see the
-  header of `pi/app/littlelx.c`, including the `UPD` update commands
+  header of `pi/app/littlelx.c`, including the `UPD` update commands. Lines
+  carry a checksum, and the bridge re-sends the whole screen in the
+  background, so a damaged line can't leave a gap on the screen.
+* MA3 → bridge: `/littlelx/...` OSC messages, see `ma3/littlelx.lua`
 * Speeds: USB 500000 baud, Mega ⇄ Pi 500000 baud
