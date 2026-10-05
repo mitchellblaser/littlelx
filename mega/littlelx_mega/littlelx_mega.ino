@@ -53,7 +53,7 @@
 
 #define NPINS 70
 #define DEBOUNCE_MS 4
-#define ANALOG_STEP 6     /* counts; the bridge sends whole % (~10 counts) */
+#define ANALOG_STEP 3     /* counts (0.3%): ignores ADC flicker, never delays a move */
 #define PI_BAUD 250000    /* exact on the AVR and the Pi; tolerant of so-so wiring */
 #define PISER Serial3
 #define PI_TX 14
@@ -80,7 +80,6 @@ static uint8_t state[NPINS];      /* reported state */
 static uint8_t lastread[NPINS];
 static uint16_t changed_at[NPINS];
 
-static uint16_t aval[16];         /* filtered x16 */
 static int16_t asent[16];
 static uint8_t ach = 0, adc_pass = 0, adc_busy = 0;
 
@@ -417,8 +416,14 @@ static bool drive_low_and_read(uint8_t p, const uint8_t *pins, uint8_t n, uint8_
 	return true;
 }
 
+static void poll_serial();
+
+static void scan_analog();
+
 static void mx_drive(uint8_t p)
 {
+	poll_serial(); /* keep relaying: the USB receive buffer is only 64 bytes */
+	scan_analog(); /* and keep the faders sampled quickly */
 	uint8_t follow[NPINS], nf;
 	if (drive_low_and_read(p, mx_pins, mx_n, follow, &nf))
 		for (uint8_t i = 0; i < nf; i++)
@@ -471,12 +476,8 @@ static void scan_analog()
 		uint16_t v = ADC;
 		adc_busy = 0;
 		if (adc_pass == 1) {
-			uint16_t f = aval[ach];
-			f = f - (f >> 2) + (v << 2); /* IIR, value x16 */
-			aval[ach] = f;
-			int16_t out = (f + 8) >> 4;
-			if (out > 1023)
-				out = 1023;
+			/* no smoothing: faders are sent as they are */
+			int16_t out = v;
 			if (out <= 24)  /* floating pins settle ~10-20: treat as 0 */
 				out = 0;
 			if (out >= 1000) /* ~2% at each end so faders hit clean 0/100% */
@@ -566,7 +567,6 @@ void setup()
 		apply_mode(p);
 	}
 	for (uint8_t i = 0; i < 16; i++) {
-		aval[i] = 0;
 		asent[i] = -100;
 	}
 	Serial.println(F("HELLO littlelx-mega 1"));

@@ -236,14 +236,19 @@ letter.
 | Keys 6–15 | Executor 101–110 buttons |
 | Keys 16 / 17 | Page − / Page + |
 | Keys 18 / 19 / 20 | Clear / Go+ / Oops |
-| Encoder 1 | `Attribute "Dimmer" At ± 2`; push = Clear |
+| Encoder 1 | Dimmer ± 1 per click (± 0.1 when MA's Dimmer encoder resolution is Fine); push = toggle Coarse/Fine in MA |
 | Encoder 2 | Page −/+; push = Keypad screen |
 | Touchscreen | MA fader levels + physical position, names; Page −/+, Clear, Oops, Keypad, Go −, Pause, Go +, Highlight, Blind, Last, Next; a full command keypad |
 
 Actions are one of `{"exec": 201}`, `{"key": "Store"}` (a console key typed into
 MA's command line; `"Please"`, `"Clear"` and `"<-"` act on the line), `{"cmd": "Go+"}`
-(a command run right away), `{"page": 1}` or `{"screen": "keypad"}`. Encoder
-commands use `{d}` for the step.
+(a command run right away), `{"page": 1}`, `{"screen": "keypad"}` or
+`{"resolution": "Dimmer"}` (toggle MA's Coarse/Fine for that attribute). Encoders
+take `{"attribute": "Pan", "step": 1}` (follows MA's Coarse/Fine), `{"page": 1}` or
+a `{"cmd": ...}` using `{d}` for the step.
+
+Encoders are counted on the computer: if one needs two clicks per step, the
+bridge notices after a couple of clicks, fixes it and saves it on the controller.
 
 **Faders not moving in MA3?** MA3 versions differ in the fader message they
 accept. Run `littlelx.py --test-faders`: it moves executor 201 using each known

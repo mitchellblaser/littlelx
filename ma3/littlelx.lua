@@ -14,7 +14,9 @@
 --   "clear"        clear the line, or Clear if it's empty
 --   "back"         remove the last word
 --   "page 3"       select executor page 3
---   "__start <osc line> <tick>"   start reporting from a Timer (bridge install)
+--   "res Dimmer"   toggle MA's encoder resolution for an attribute (Coarse/Fine)
+--   "__start <osc line> <tick> [Attr,Attr]"   start reporting from a Timer
+--                  (bridge install); also report those attributes' resolution
 --
 -- MA needs an OSC line that SENDS to the bridge computer (its IP, port 9000,
 -- Send = Yes). Its number is passed by the bridge; 2 if run as a plugin.
@@ -24,6 +26,7 @@ local WATCH = {}                    -- executors reported (buttons and faders)
 for i = 101, 115 do WATCH[#WATCH + 1] = i end
 for i = 201, 215 do WATCH[#WATCH + 1] = i end
 local MASTERS = { "highlight", "lowlight", "solo", "blind" }
+local ATTRS = { "Dimmer" }          -- attributes whose encoder resolution we report
 local TICK = 0.1                    -- seconds between checks
 local RUNVAR = "littlelx_running"
 local GENVAR = "littlelx_gen"       -- bumps on every (re)start; old timers stop
@@ -68,6 +71,32 @@ local function master_on(name)
 	return ok and v and 1 or 0
 end
 
+-- MA's per-attribute encoder resolution (user profile) as a step factor:
+-- Coarse 1, Fine 0.1, Increment 0.01 (MA stores these as 2^24-scaled numbers).
+local RES_NAMES = { coarse = 1, fine = 0.1, increment = 0.01, ultra = 0.01 }
+local function attr_prefs(attr)
+	local ok, p = pcall(function() return CurrentProfile().UserAttributePreferences[attr] end)
+	return ok and p or nil
+end
+local function resolution(attr)
+	local p = attr_prefs(attr)
+	if not p then return 1 end
+	local ok, v = pcall(function() return p.EncoderResolution end)
+	if not ok or v == nil then return 1 end
+	if type(v) == "number" then
+		if v <= 0 then return 1 end -- Default / Native: treat as coarse
+		return math.floor(v / 16777216 * 1000 + 0.5) / 1000
+	end
+	return RES_NAMES[tostring(v):lower()] or 1
+end
+local function toggle_resolution(attr)
+	local profile = "Default"
+	pcall(function() profile = CurrentProfile().name or profile end)
+	local nextres = resolution(attr) >= 1 and "Fine" or "Coarse"
+	Cmd(string.format('Set Root "ShowData"."UserProfiles"."%s"."UserAttributePreferences"."%s" Property "EncoderResolution" "%s"',
+		profile, attr, nextres))
+end
+
 local function watched(no)
 	for _, n in ipairs(WATCH) do
 		if n == no then return true end
@@ -110,6 +139,10 @@ local function report(force)
 	end
 	local t = cmdtext()
 	if changed("cmd", t) then send("cmdline", "s", t) end
+	for _, a in ipairs(ATTRS) do
+		local r = resolution(a)
+		if changed("res" .. a, r) then send("res/" .. a, "f", r) end
+	end
 end
 
 -- ---- acting on the command line --------------------------------------
@@ -136,6 +169,13 @@ local function act(arg)
 	if verb == "page" then
 		local n = num(rest)
 		if n and n >= 1 then Cmd("Page " .. math.floor(n)) end
+		return
+	end
+	if verb == "res" then
+		toggle_resolution(rest)
+		local r = resolution(rest)
+		last["res" .. rest] = r
+		send("res/" .. rest, "f", r)
 		return
 	end
 	-- Typing goes to whatever has keyboard focus: don't type into popups.
@@ -181,9 +221,13 @@ end
 
 -- Bridge install: no plugin object, so run from MA's Timer. The Timer API
 -- documents a whole-second delay; try our tick first, fall back to 1 s.
-local function start_timer(line, tick_s)
+local function start_timer(line, tick_s, attrs)
 	OSC_LINE = num(line) or OSC_LINE
 	TICK = num(tick_s) or TICK
+	if attrs and attrs ~= "" then
+		ATTRS = {}
+		for a in attrs:gmatch("[^,]+") do ATTRS[#ATTRS + 1] = a end
+	end
 	local gen = (num(GetVar(GlobalVars(), GENVAR)) or 0) + 1
 	SetVar(GlobalVars(), GENVAR, gen)
 	local function step()
@@ -202,9 +246,9 @@ end
 
 local function main(display, arg)
 	if arg and arg ~= "" then
-		local line, tick_s = arg:match("^__start%s+(%S+)%s*(%S*)")
+		local line, tick_s, attrs = arg:match("^__start%s+(%S+)%s*(%S*)%s*(%S*)")
 		if line then
-			start_timer(line, tick_s)
+			start_timer(line, tick_s, attrs)
 		else
 			act(arg)
 		end

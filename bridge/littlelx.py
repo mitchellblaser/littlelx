@@ -66,9 +66,13 @@ def bridge_version():
 #   {"screen": "keypad"}          switch touchscreen page
 # Touch buttons can also have "state": "highlight"|"lowlight"|"solo"|"blind"
 # to light up while that is active in MA (executor buttons light by themselves).
-# Encoder actions: {"cmd": "... {d} ..."} with {d} = signed step, or {"page": 1}
+# Encoder actions:
+#   {"attribute": "Dimmer", "step": 1}   % per click at MA's Coarse resolution;
+#                                        follows MA's Coarse/Fine for that attribute
+#   {"cmd": "... {d} ..."}               {d} = step per click, or {"page": 1}
+# Push actions also allow {"resolution": "Dimmer"}: toggle MA's Coarse/Fine.
 
-CONFIG_VERSION = 2
+CONFIG_VERSION = 3
 
 DEFAULTS = {
     "config_version": CONFIG_VERSION,
@@ -94,7 +98,7 @@ DEFAULTS = {
         + [{"page": -1}, {"page": 1}, {"key": "Clear"}, {"cmd": "Go+"}, {"cmd": "Oops"}]
     ),
     "encoders": [
-        {"cmd": "Attribute \"Dimmer\" At + {d}", "step": 2, "push": {"key": "Clear"}},
+        {"attribute": "Dimmer", "step": 1, "push": {"resolution": "Dimmer"}},
         {"page": 1, "push": {"screen": "keypad"}},
     ],
     "touch_buttons": [
@@ -133,6 +137,7 @@ def load_config():
             else:
                 cfg[k] = v
         if user.get("config_version", 1) < CONFIG_VERSION:
+            cfg["config_version"] = user.get("config_version", 1)
             migrate(cfg)
             cfg["config_version"] = CONFIG_VERSION
             save_config(cfg)
@@ -154,8 +159,17 @@ def migrate(cfg):
     for e in cfg.get("encoders", []):
         if e and e.get("push") == {"cmd": "Clear"}:
             e["push"] = {"key": "Clear"}
-    cfg.pop("sync_page_to_ma", None)
-    cfg["pickup"] = True  # old default was off; soft takeover is now on
+    if cfg.get("config_version", 1) < 2:
+        cfg.pop("sync_page_to_ma", None)
+        cfg["pickup"] = True  # old default was off; soft takeover is now on
+    for e in cfg.get("encoders", []):  # v3: attribute encoders follow MA's resolution
+        m = re.match(r'Attribute "([^"]+)" At \+ \{d\}$', (e or {}).get("cmd", ""))
+        if m:
+            e.pop("cmd")
+            e["attribute"] = m.group(1)
+            e["step"] = 1
+            if e.get("push") in ({"key": "Clear"}, {"cmd": "Clear"}):
+                e["push"] = {"resolution": m.group(1)}
 
 
 def save_config(cfg):
@@ -294,8 +308,8 @@ class Pacer:
     def wait(self, nbytes):
         now = time.time()
         self.free = max(now, self.free) + nbytes / self.rate
-        if self.free - now > 0.003:
-            time.sleep(self.free - now - 0.003)
+        if self.free - now > 0.001:
+            time.sleep(self.free - now - 0.001)
 
 
 def checksummed(line):
@@ -317,10 +331,19 @@ class Port:
         self.path = path
         self.closed = False
         if serial:
-            self.s = serial.Serial(path, BAUD, timeout=0.1)
+            try:  # exclusive: a second program on the port would garble everything
+                self.s = serial.Serial(path, BAUD, timeout=0.1, exclusive=True)
+            except (ValueError, TypeError):  # exclusive not supported (Windows is exclusive anyway)
+                self.s = serial.Serial(path, BAUD, timeout=0.1)
         else:  # stdlib fallback for Mac/Linux
             import termios
             self.fd = os.open(path, os.O_RDWR | os.O_NOCTTY)
+            import fcntl
+            try:
+                fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                os.close(self.fd)
+                raise OSError("port in use - is the bridge (or another littlelx tool) already running?")
             a = termios.tcgetattr(self.fd)
             a[0] = a[1] = a[3] = 0
             a[2] = termios.CS8 | termios.CREAD | termios.CLOCAL
@@ -885,7 +908,10 @@ class Bridge:
         self.fader_cmd_pending = [None] * 5
         self.verbose = False
         self.ma = dict(alive=0.0, page=None, fader={}, run={}, name={}, master={}, cmdline="",
-                       busy="", busy_at=0.0)
+                       busy="", busy_at=0.0, res={})
+        self.enc_edge_at = [0.0, 0.0]        # encoder click-size auto-detection
+        self.enc_checked = [0.0, 0.0]
+        self.enc_rest = [set(), set()]
         self.ma_values = {}                  # (page, exec) -> 0..100 from plain OSC feedback
         self.ma_seen = 0
         self.ma_installed_at = 0.0
@@ -1025,7 +1051,11 @@ class Bridge:
             time.sleep(0.01)
         self.osc("/cmd", f"Lua \"SetVar(GlobalVars(),'llx_n',{len(pieces)})\"")
         time.sleep(0.05)
-        self.osc("/cmd", 'Lua "' + self.MA_RUN.replace("{arg}", f"__start {line} {tick}") + '"')
+        attrs = ",".join(sorted({e["attribute"] for e in self.cfg["encoders"] if e and e.get("attribute")}
+                                | {e["push"]["resolution"] for e in self.cfg["encoders"]
+                                   if e and isinstance(e.get("push"), dict) and "resolution" in e["push"]})) or "Dimmer"
+        attrs = re.sub(r"[^A-Za-z0-9,_]", "", attrs)
+        self.osc("/cmd", 'Lua "' + self.MA_RUN.replace("{arg}", f"__start {line} {tick} {attrs}") + '"')
 
     def to_pi(self, line):
         if not self.ser:
@@ -1067,6 +1097,11 @@ class Bridge:
             return
         elif "key" in act:
             self.ma_key(act["key"])
+        elif "resolution" in act:
+            if self.ma_linked():
+                self.ma_plugin(f"res {act['resolution']}")
+            else:
+                print("Coarse/fine needs the MA3 link (second OSC line).")
         elif "cmd" in act:
             self.ma_cmd(act["cmd"])
         elif "page" in act:
@@ -1110,7 +1145,12 @@ class Bridge:
             else:  # soft takeover: take control once the fader reaches MA's level
                 crossed = prev is not None and (prev - ma) * (value - ma) <= 0
                 self.picked[i] = crossed or abs(value - ma) <= 2
-        if self.picked[i] and (self.fader_sent[i] is None or round(value) != round(self.fader_sent[i])):
+        sent = self.fader_sent[i]
+        if self.cfg["osc"].get("fader_type", "i") in ("f", "f1"):
+            changed = sent is None or abs(value - sent) >= 0.25  # decimal formats: fine steps
+        else:
+            changed = sent is None or round(value) != round(sent)
+        if self.picked[i] and changed:
             self.send_fader(i, value)
         if self.pi_ready:
             self.screen.update_fader(i)
@@ -1163,6 +1203,7 @@ class Bridge:
                 if act.get("push"):
                     self.do_action(act["push"], v == 0)
                 return
+            self.enc_edge_at[i] = time.time()
             d = self.encs[i].update(self.pins.get(e["a"], 1), self.pins.get(e["b"], 1))
             if d and e.get("reverse"):
                 d = -d
@@ -1170,7 +1211,12 @@ class Bridge:
                 self.on_encoder(act, d)
 
     def on_encoder(self, act, d):
-        if "page" in act:
+        if "attribute" in act:
+            attr = act["attribute"]
+            factor = self.ma["res"].get(attr, 1.0) if self.ma_linked() else 1.0
+            step = d * float(act.get("step", 1)) * factor
+            self.ma_cmd(f'Attribute "{attr}" At {"+" if step > 0 else "-"} {abs(step):g}')
+        elif "page" in act:
             self.set_page(self.page + d * int(act["page"]))
         elif "cmd" in act:
             step = d * act.get("step", 1)
@@ -1200,6 +1246,12 @@ class Bridge:
         elif parts[0] == "STAT":
             st = dict(kv.split("=", 1) for kv in parts[1:] if "=" in kv)
             errs = {k: int(v) for k, v in st.items() if k != "lines" and v.isdigit() and int(v)}
+            if errs.get("bad", 0) > getattr(self, "last_bad", 0) and self.ser:
+                # damaged lines are increasing: slow the link down (the screen
+                # is re-sent in the background, so it heals by itself)
+                self.ser.pacer.rate = max(4000, self.ser.pacer.rate * 0.7)
+                print(f"  slowing the link to the touchscreen to {self.ser.pacer.rate / 1000:.1f} KB/s")
+            self.last_bad = errs.get("bad", 0)
             if errs and errs != getattr(self, "last_stat", None):
                 self.last_stat = errs
                 lines = int(st.get("lines", "0") or 0)
@@ -1306,10 +1358,30 @@ class Bridge:
             ma["busy"], ma["busy_at"] = str(val or ""), time.time()
             if scr:
                 scr.update_cmdline()
+        elif what.startswith("res/"):
+            ma["res"][what.split("/", 1)[1]] = float(val or 1)
         elif what == "started":
             print(f"MA3 code running (update every {val} s).")
         if scr and not was_linked:
             scr.update_header()
+
+    def check_encoder_clicks(self, now):
+        """Learn how many signal changes one click is: a full-cycle encoder always
+        rests on the same state, a half-cycle one alternates between two."""
+        for i, e in enumerate(self.cfg["hw"]["encoders"]):
+            enc = self.encs[i] if i < len(self.encs) else None
+            if not e or not enc or self.enc_edge_at[i] <= self.enc_checked[i] or now - self.enc_edge_at[i] < 0.25:
+                continue
+            self.enc_checked[i] = now
+            self.enc_rest[i].add(enc.state)
+            div = {1: 4, 2: 2}.get(len(self.enc_rest[i]), 1)
+            if div < e.get("div", 4):
+                e["div"] = enc.div = div
+                enc.acc = 0
+                print(f"Encoder {i + 1}: {div} signal changes per click detected, adjusted.")
+                save_config(self.cfg)
+                if self.ser:
+                    save_to_mega(self.cfg, self.ser)
 
     # ---- main loop
     def run(self):
@@ -1350,6 +1422,7 @@ class Bridge:
                     break
                 now = time.time()
                 self.flush_faders()
+                self.check_encoder_clicks(now)
                 if (self.cfg.get("ma3", {}).get("auto_install", True) and not self.ma_linked()
                         and now - started > 4 and now - self.ma_installed_at > 30):
                     self.install_ma3()
@@ -1543,6 +1616,7 @@ def calibrate_faders(cfg):
     by_ch = {f["ch"]: i for i, f in faders}
     latest = {}
     NEXT = 1
+    find_screen(ser)
 
     def screen(title, button):
         ser.send(">CLR")
@@ -1557,7 +1631,11 @@ def calibrate_faders(cfg):
         print(title.replace("\\n", " ") + ", then press Enter here or tap Next on the screen.")
         screen(title, "Next")
         ser.send("?")  # Mega replies with every current value
+        ping = time.time()
         while True:
+            if time.time() - ping > 1:  # the screen drops lines once it thinks we've gone
+                ser.send(">PING")
+                ping = time.time()
             try:
                 kind, src, data = events.get(timeout=0.2)
             except queue.Empty:
@@ -1599,16 +1677,24 @@ def calibrate_faders(cfg):
     print(f"Saved to {CONFIG_PATH}.")
 
 
+def find_screen(ser, required=False):
+    """Say hello to the touchscreen. Its HELLO also tells the serial layer to
+    use checksums, without which the screen ignores what we draw."""
+    print("Looking for the touchscreen...")
+    for _ in range(8):
+        ser.send(">?")
+        if wait_line(ser, lambda l: l.startswith(">HELLO"), 2):
+            return True
+    if required:
+        sys.exit("The touchscreen isn't answering. Is it showing 'waiting for computer'?")
+    print("The touchscreen isn't answering; carrying on without it.")
+    return False
+
+
 def calibrate(cfg):
     ser = connect(cfg)
     sync_setup(cfg, ser)
-    print("Looking for the touchscreen...")
-    for _ in range(8):  # its HELLO also tells the serial layer to use checksums
-        ser.send(">?")
-        if wait_line(ser, lambda l: l.startswith(">HELLO"), 2):
-            break
-    else:
-        sys.exit("The touchscreen isn't answering. Is it showing 'waiting for computer'?")
+    find_screen(ser, required=True)
     for _ in range(6):
         ser.send(">CAL")
         if wait_line(ser, lambda l: l == ">CALSTART", 1.5):
@@ -1616,7 +1702,10 @@ def calibrate(cfg):
     else:
         sys.exit("The touchscreen didn't start calibrating (old firmware? run --update-pi).")
     print("Tap the three crosses on the touchscreen...")
-    line = wait_line(ser, lambda l: l.startswith(">CALD "), 120)
+    line, end = None, time.time() + 120
+    while not line and time.time() < end:
+        ser.send(">PING")  # keep the screen listening while you tap
+        line = wait_line(ser, lambda l: l.startswith(">CALD "), 1)
     if not line:
         sys.exit("No calibration received.")
     cal = [float(x) for x in line.split()[1:7]]
