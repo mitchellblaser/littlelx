@@ -34,7 +34,7 @@ echo "== app ($VERSION)"
 make -C "$HERE/app" clean >/dev/null
 if python3 -m ziglang version >/dev/null 2>&1; then
 	echo "(musl, via zig)"
-	make -C "$HERE/app" CC="python3 -m ziglang cc -target arm-linux-musleabihf -mcpu=cortex_a53" \
+	make -C "$HERE/app" CC="python3 -m ziglang cc -target arm-linux-musleabihf -mcpu=cortex_a7" \
 		STRIP=true CFLAGS="-Os -DLLX_VERSION=\\\"$VERSION\\\"" LDFLAGS="-static -s"
 else
 	echo "(glibc; pip install ziglang for a ~5x smaller app)"
