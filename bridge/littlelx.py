@@ -749,6 +749,7 @@ class Screen:
         self.value_entry = ""
         self.sets_page = 0
         self.sets_rows = 3
+        self.sets_sel = -1     # highlighted named value (encoder turns move it)
         self.cmdline = ""      # local command line (used when MA isn't linked)
         self.keymap = {}
         self.w, self.h = 320, 480
@@ -1040,21 +1041,48 @@ class Screen:
             k = first + n
             if k < len(sets):
                 self.keymap[wid] = {"setv": k + 1, "enc": i}
-                self.setw(wid, text=sets[k][:14], colors=(C_KEY2, C_TEXT, C_BTN_ON))
+                self.setw(wid, value=1 if k == self.sets_sel else 0, text=sets[k][:14],
+                          colors=(C_KEY2, C_TEXT, C_BTN_ON))
             else:
                 self.keymap.pop(wid, None)
                 self.setw(wid, text="", colors=(C_BG, C_DIM, C_BG))
         if self.SET_MORE in self.state:
-            self.setw(self.SET_MORE, text=f"turn the encoder for more   {first + 1}-{min(first + rows * 3, len(sets))}"
-                                           f" of {len(sets)}")
+            self.setw(self.SET_MORE, text=f"turn the encoder to choose, click to use   "
+                                           f"{first + 1}-{min(first + rows * 3, len(sets))} of {len(sets)}")
+
+    def entry_sets(self):
+        """Named values on the open value page, or []."""
+        if not self.name.startswith("entry"):
+            return []
+        a = self.b.encoder_attr(int(self.name[5:]))
+        return self.b.ma["sets"].get(a[0].lower(), []) if a else []
 
     def scroll_sets(self, d):
-        """Encoder turned while typing a value: scroll the named values a row."""
-        if not self.name.startswith("entry") or self.SET0 + 20 not in self.state:
+        """Encoder turned on the value page: move the highlight through the named
+        values (the list follows it); clicking the encoder then applies it."""
+        sets = self.entry_sets()
+        if not sets or self.SET0 + 20 not in self.state:
             return False
-        self.sets_page += d
+        self.sets_sel = max(0, min(len(sets) - 1, (self.sets_sel if self.sets_sel >= 0 else -1) + d))
+        row = self.sets_sel // 3
+        if row < self.sets_page:
+            self.sets_page = row
+        elif row >= self.sets_page + self.sets_rows:
+            self.sets_page = row - self.sets_rows + 1
         self.show_sets(int(self.name[5:]))
         return True
+
+    def encoder_click(self):
+        """Encoder clicked on the value page: apply the highlighted named value,
+        or Set the typed number; otherwise just close."""
+        i = int(self.name[5:])
+        a = self.b.encoder_attr(i)
+        sets = self.entry_sets()
+        if a and 0 <= self.sets_sel < len(sets):
+            self.b.ma_plugin(f"setv {a[0]} {self.sets_sel + 1}")
+        elif a and self.value_entry not in ("", "-", "."):
+            self.b.set_value(a[0], self.value_entry)
+        self.set_screen("encoders")
 
     def draw_value_entry(self, i, keep=False):
         """Number pad for the encoder's attribute, and above it the selected
@@ -1080,6 +1108,15 @@ class Screen:
         self.widget(self.SET_TITLE, "L", 4, top, w - 8, 56, "000000", C_CMD, "000000", 1, 0, 0, self.value_title(i))
         y = top + 60
         sets = b.ma["sets"].get(a[0].lower(), []) if a else []
+        if not keep:
+            self.sets_sel = -1
+        if sets and self.sets_sel < 0:  # highlight the one it is on now ("0 Closed" -> Closed)
+            now = (a[2] or "").lower()
+            for k, name in enumerate(sets):
+                if now == name.lower() or now.endswith(" " + name.lower()):
+                    self.sets_sel = k
+                    self.sets_page = max(0, k // 3 - 1)
+                    break
         if sets:  # named values above the number pad
             sh = 40
             rows = min(3, -(-len(sets) // 3))
@@ -1582,8 +1619,10 @@ class Bridge:
         """Click: type a value for the encoder's attribute (Coarse/Fine is on the
         screen). An encoder without an attribute (Page) does its push action."""
         if self.encoder_attr(i) or self.following(i):
-            if down and self.pi_ready and self.encoder_attr(i):
-                self.screen.set_screen("encoders" if self.screen.name == f"entry{i}" else f"entry{i}")
+            if down and self.pi_ready and self.screen.name.startswith("entry"):
+                self.screen.encoder_click()
+            elif down and self.pi_ready and self.encoder_attr(i):
+                self.screen.set_screen(f"entry{i}")
             return
         act = self.cfg["encoders"][i] if i < len(self.cfg["encoders"]) else {}
         if act and act.get("push"):
