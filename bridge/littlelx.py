@@ -82,6 +82,7 @@ DEFAULTS = {
         "prefix": "/gma3",        # MA3 OSC line "Prefix" (gma3), "" if none
         "listen_port": 9000,      # MA3 "Send" destination port, for feedback
         "fader_interval": 0.025,  # s between messages per fader (MA lags if flooded)
+        "fader_jump": 5,          # % moved that is sent at once (fast throws stay smooth)
         "fader_type": "i",        # how faders are sent; --test-faders picks it (see FADER_FORMATS)
     },
     "ma3": {
@@ -1262,11 +1263,16 @@ class Bridge:
 
     def send_fader(self, i, value):
         fmt = self.cfg["osc"].get("fader_type", "i")
-        # At most one message per fader_interval, always the newest position.
-        # MA applies fader messages at a limited rate: send one per percent of a
-        # long move and it queues them up and trails behind the real fader.
+        # One message per fader_interval, always the newest position: MA can't
+        # take one per percent of a long move (it queues them and trails behind).
+        # A fast throw would then be only a few steps, so a move of fader_jump %
+        # since the last message goes out at once (but never closer than 4 ms).
         now = time.time()
-        if now - self.fader_cmd_at[i] < self.fader_interval(fmt):
+        gap = now - self.fader_cmd_at[i]
+        jump = float(self.cfg["osc"].get("fader_jump", 5))
+        big = (not fmt.startswith("cmd") and self.fader_sent[i] is not None
+               and abs(value - self.fader_sent[i]) >= jump)
+        if gap < self.fader_interval(fmt) and not (big and gap >= 0.004):
             self.fader_cmd_pending[i] = value
             return
         self.fader_cmd_at[i] = now

@@ -253,8 +253,9 @@ per step, the bridge notices within a few clicks, fixes it and saves it on the
 controller.
 
 Faders send at most `"fader_interval"` apart (0.025 s = 40 updates a second per
-fader, in the `osc` section): slow moves still go out every 1 %, fast moves in
-bigger steps, always ending on the exact final position. MA falls behind when
+fader, in the `osc` section): slow moves still go out every 1 %, faster moves
+in bigger steps, always ending on the exact final position. A move of
+`"fader_jump"` % (5) goes out at once, so even a fast throw is about 20 steps. MA falls behind when
 flooded with one message per percent.
 
 **Faders not moving in MA3?** MA3 versions differ in the fader message they
