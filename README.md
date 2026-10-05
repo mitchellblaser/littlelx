@@ -242,7 +242,8 @@ letter.
 
 **Changing what a key does:** tap **Setup** at the top of the touchscreen, press the
 key on the controller (or tap it in the list) and pick a function, or
-**Executor...** to type an executor number. Saved straight away.
+**Executor...** to type an executor number. Saved straight away, on the
+controller too, so the keys travel with it to any computer.
 
 Actions are one of `{"exec": 201}`, `{"key": "Store"}` (a console key typed into
 MA's command line; `"Please"`, `"Clear"` and `"<-"` act on the line), `{"cmd": "Go+"}`
@@ -256,7 +257,7 @@ selected fixture, two at a time (the **1/2** button on the Encoders page swaps
 pairs). The page shows each attribute's value in MA's colours (red = in the
 programmer) and its Coarse/Fine (tap, or press the encoder, to toggle). With
 nothing selected in MA they fall back to what's set in the config (Dimmer and
-Page), and the Encoders page has Change to pick another. If the page stays on
+Page). If the page stays on
 "Select fixtures in MA" although fixtures are selected, run
 `littlelx.py --ma-probe` (with the bridge stopped) and send the output.
 

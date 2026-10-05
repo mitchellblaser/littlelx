@@ -521,18 +521,29 @@ def connect(cfg, verbose=True):
 EE_MODES, EE_BLOB, EE_SIZE = 0, 128, 4096
 
 
-def wait_line(ser, pred, timeout):
+def wait_line(ser, pred, timeout, keep=False):
+    """Wait for a Mega line matching pred. Other events are dropped, or with
+    keep=True (the running bridge) put back, in order, for the main loop."""
     end = time.time() + timeout
-    while time.time() < end:
-        try:
-            kind, src, line = events.get(timeout=0.1)
-        except queue.Empty:
-            continue
-        if kind == "lost" and src is ser:
-            raise OSError("controller disconnected")
-        if kind == "mega" and src is ser and pred(line):
-            return line
-    return None
+    kept = []
+    try:
+        while time.time() < end:
+            try:
+                ev = events.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            kind, src, line = ev
+            if kind == "lost" and src is ser:
+                raise OSError("controller disconnected")
+            if kind == "mega" and src is ser and pred(line):
+                return line
+            if keep:
+                kept.append(ev)
+        return None
+    finally:
+        if kept:
+            with events.mutex:
+                events.queue.extendleft(reversed(kept))
 
 
 def mega_read(ser, addr, n):
@@ -550,12 +561,12 @@ def mega_read(ser, addr, n):
     return out
 
 
-def mega_write(ser, addr, data):
+def mega_write(ser, addr, data, keep=False):
     for off in range(0, len(data), 32):
         a = addr + off
         for _ in range(3):
             ser.send(f"W{a} {data[off:off + 32].hex()}")
-            if wait_line(ser, lambda l: l == f"W{a} OK", 2.0):
+            if wait_line(ser, lambda l: l == f"W{a} OK", 2.0, keep):
                 break
         else:
             raise TimeoutError("EEPROM write not confirmed")
@@ -581,10 +592,12 @@ def learned(cfg):
 
 
 def setup_blob(cfg):
-    return {"hw": cfg["hw"], "touch_cal": cfg.get("touch_cal")}
+    """What the controller carries to any computer: wiring, touch calibration
+    and what the keys do."""
+    return {"hw": cfg["hw"], "touch_cal": cfg.get("touch_cal"), "keys": cfg.get("keys")}
 
 
-def save_to_mega(cfg, ser):
+def save_to_mega(cfg, ser, keep=False):
     data = zlib.compress(json.dumps(setup_blob(cfg), separators=(",", ":")).encode(), 9)
     if len(data) > EE_SIZE - EE_BLOB - 8:
         print("Setup too big for the controller's memory; kept on this computer only.")
@@ -593,9 +606,9 @@ def save_to_mega(cfg, ser):
     for pin, m in cfg["hw"]["pin_modes"].items():
         modes[int(pin)] = int(m)
     try:
-        mega_write(ser, EE_BLOB + 8, data)  # data first, header (with CRC) last
-        mega_write(ser, EE_BLOB, b"CF" + struct.pack("<HI", len(data), zlib.crc32(data)))
-        mega_write(ser, EE_MODES, b"LX" + bytes(modes))
+        mega_write(ser, EE_BLOB + 8, data, keep)  # data first, header (with CRC) last
+        mega_write(ser, EE_BLOB, b"CF" + struct.pack("<HI", len(data), zlib.crc32(data)), keep)
+        mega_write(ser, EE_MODES, b"LX" + bytes(modes), keep)
         print("Setup saved on the controller (it travels with it to any computer).")
     except (TimeoutError, OSError) as e:
         print(f"Couldn't save the setup on the controller ({e}); it is saved on this computer.")
@@ -624,13 +637,16 @@ def sync_setup(cfg, ser):
     except (OSError, ValueError, zlib.error):
         blob = None
     if blob and blob.get("hw") and any(blob["hw"].get(k) for k in ("faders", "keys", "encoders")):
-        if blob != setup_blob(cfg):
-            cfg["hw"] = blob["hw"]
-            cfg["touch_cal"] = blob.get("touch_cal")
+        mine = setup_blob(cfg)
+        merged = dict(mine, **{k: v for k, v in blob.items() if k in mine})  # the controller's wins
+        changed = merged != mine
+        if changed:
+            cfg.update(merged)
             save_config(cfg)
             print("Loaded the learned setup from the controller.")
-            return True
-        return False
+        if any(k not in blob for k in mine):  # saved by an older bridge: add what it lacks (keys)
+            save_to_mega(cfg, ser)
+        return changed
     if learned(cfg):
         print("Copying this computer's learned setup onto the controller...")
         save_to_mega(cfg, ser)
@@ -704,8 +720,6 @@ class Screen:
     KEY0 = 40
     ENC0 = 66      # encoders page: 10 ids per encoder
     ENC_FEAT, ENC_PAGE = 86, 87
-    PICK_TITLE = 89
-    PICK0 = 90     # attribute choices
     BACK = 120
     SET_TITLE, SET_RESET = 121, 122
     SET0 = 125     # setup grids (keys, functions, digits)
@@ -840,8 +854,6 @@ class Screen:
             self.draw_keypad()
         elif self.name == "encoders":
             self.draw_encoders()
-        elif self.name.startswith("pick"):
-            self.draw_picker(int(self.name[4:]))
         elif self.name == "setup":
             self.draw_setup()
         elif self.name.startswith("key"):
@@ -917,7 +929,7 @@ class Screen:
         """The two encoders, stacked like the hardware. Following MA: the
         selected feature, a 1/2 button to swap pairs, and for each encoder the
         attribute, its value (red = in the programmer, like MA) and Coarse/Fine.
-        Otherwise what each encoder is set to, with Change."""
+        Otherwise (nothing selected in MA) what each encoder is set to."""
         w = self.w
         b = self.b
         self.enc_mode = b.ma_encoders_on()
@@ -938,13 +950,7 @@ class Screen:
             vh = ph - 26 - 62
             self.widget(base + 1, "L", 8, y + 28, w - 16, vh, C_PANEL, C_TEXT, C_PANEL, 2, 0, 0, "")
             by, bh = y + 30 + vh, ph - 30 - vh - 10
-            if self.enc_mode:
-                self.widget(base + 2, "B", 8, by, w - 16, bh, C_BTN, C_TEXT, C_BTN_ON, 1, 0, 0, "")
-            else:
-                bw = (w - 20) // 2
-                self.widget(base + 2, "B", 8, by, bw, bh, C_BTN, C_TEXT, C_BTN_ON, 1, 0, 0, "")
-                self.keymap[base + 3] = {"pick": i}
-                self.widget(base + 3, "B", 12 + bw, by, bw, bh, C_KEY2, C_TEXT, C_BTN_ON, 1, 0, 0, "Change")
+            self.widget(base + 2, "B", 8, by, w - 16, bh, C_BTN, C_TEXT, C_BTN_ON, 1, 0, 0, "")
         self.back_button()
         self.update_encoders()
 
@@ -996,42 +1002,6 @@ class Screen:
                 self.setw(base + 2, value=1 if res in ("Fine", "Ultra") else 0, text=res,
                           colors=(C_BTN, C_TEXT, C_BTN_ON))
 
-    def draw_picker(self, i):
-        w = self.w
-        top = self.header_h() + 4
-        self.keymap = {}
-        self.widget(self.PICK_TITLE, "L", 4, top, w - 8, 30, C_PANEL, C_TEXT, C_PANEL, 1, 0, 0,
-                    f"Encoder {i + 1} controls:")
-        choices = list(self.b.cfg.get("encoder_attributes", []))[:24] + ["Page"]
-        current, _ = self.encoder_info(i)
-        cols = 3
-        rows = -(-len(choices) // cols)
-        gy = top + 36
-        bw, bh = (w - 4) // cols, min(64, (self.h - 62 - gy) // rows)
-        for n, name in enumerate(choices):
-            r, c = divmod(n, cols)
-            wid = self.PICK0 + n
-            self.keymap[wid] = {"pick": i, "choice": name}
-            self.widget(wid, "B", 4 + c * bw, gy + r * bh, bw - 3, bh - 4, C_BTN, C_TEXT, C_BTN_ON,
-                        0 if len(name) > 7 else 1, 0, 1 if name == current else 0, name)
-        self.back_button()
-
-    def assign_encoder(self, i, choice):
-        encs = self.b.cfg["encoders"]
-        while len(encs) <= i:
-            encs.append({})
-        old = encs[i] or {}
-        if choice == "Page":
-            push = old.get("push")
-            if not push or "resolution" in push:
-                push = {"screen": "keypad"}
-            encs[i] = {"page": 1, "push": push}
-        else:
-            step = old.get("step", 1) if "attribute" in old else 1
-            encs[i] = {"attribute": choice, "step": step, "push": {"resolution": choice}}
-        save_config(self.b.cfg)
-        print(f"Encoder {i + 1} now controls {choice}.")
-
     # ---- Setup: what each hardware key does
     KEY_CHOICES = [
         ("Executor...", "exec"), ("Page -", {"page": -1}), ("Page +", {"page": 1}), ("Clear", {"key": "Clear"}),
@@ -1072,6 +1042,8 @@ class Screen:
             keys.append(None)
         keys[i] = act or None
         save_config(self.b.cfg)
+        if self.b.ser:
+            save_to_mega(self.b.cfg, self.b.ser, keep=True)
         print(f"Key {i + 1} now: {self.describe(act)}")
         self.set_screen("setup")
 
@@ -1250,6 +1222,8 @@ class Screen:
             self.reset_armed = 0.0
             self.b.cfg["keys"] = copy.deepcopy(DEFAULTS["keys"])
             save_config(self.b.cfg)
+            if self.b.ser:
+                save_to_mega(self.b.cfg, self.b.ser, keep=True)
             print("Keys set back to the defaults.")
             self.draw()
             return
@@ -1259,14 +1233,8 @@ class Screen:
             else:
                 self.b.ma_key(act["keypad"])
         elif "back" in act:
-            self.set_screen("encoders" if self.name.startswith("pick") else
-                            "setup" if self.name.startswith("key") else
+            self.set_screen("setup" if self.name.startswith("key") else
                             f"key{self.name[4:]}" if self.name.startswith("exec") else "main")
-        elif "choice" in act:
-            self.assign_encoder(act["pick"], act["choice"])
-            self.set_screen("encoders")
-        elif "pick" in act:
-            self.set_screen(f"pick{act['pick']}")
         elif "encpage" in act:
             self.b.next_enc_page()
         else:
@@ -1274,7 +1242,7 @@ class Screen:
 
     def on_release(self, wid):
         act = self.keymap.get(wid)
-        if act and not any(k in act for k in ("keypad", "back", "pick", "encpage", "edit", "assign",
+        if act and not any(k in act for k in ("keypad", "back", "encpage", "edit", "assign",
                                               "digit", "reset_keys")):
             self.b.do_action(act, False)
 
@@ -1814,7 +1782,7 @@ class Bridge:
                 self.cfg["touch_cal"] = cal
                 save_config(self.cfg)
                 print("Touch calibration saved")
-                save_to_mega(self.cfg, self.ser)
+                save_to_mega(self.cfg, self.ser, keep=True)
                 self.screen.draw()
 
     # ---- MA feedback
@@ -1953,7 +1921,7 @@ class Bridge:
                 print(f"Encoder {i + 1}: 2 signal changes per click detected, adjusted.")
                 save_config(self.cfg)
                 if self.ser:
-                    save_to_mega(self.cfg, self.ser)
+                    save_to_mega(self.cfg, self.ser, keep=True)
 
     # ---- main loop
     def run(self):
@@ -1973,7 +1941,7 @@ class Bridge:
             if matrix_modes(self.cfg):  # setups learned before fast matrix scanning
                 print("Switching the key matrix to fast scanning...")
                 save_config(self.cfg)
-                save_to_mega(self.cfg, self.ser)
+                save_to_mega(self.cfg, self.ser, keep=True)
             for pin, mode in self.cfg["hw"]["pin_modes"].items():
                 self.ser.send(f"M{pin} {mode}")
             self.ser.send("?")
