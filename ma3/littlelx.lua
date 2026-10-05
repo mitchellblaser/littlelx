@@ -319,8 +319,8 @@ local function channel_sets(sf, aname)
 	return out
 end
 
--- A value inside one of the fixture's named ranges reads as its name
--- ("Gobo 2", "Open"), like MA's encoder bar.
+-- A value inside one of the fixture's named ranges also shows its name
+-- ("0 Closed", "100 Open"), like MA's encoder bar.
 local sets_cache = {}
 local function value_words(sf, aname, v)
 	local x = type(v) == "string" and tonumber(v) or nil
@@ -336,7 +336,7 @@ local function value_words(sf, aname, v)
 		-- or wide range (a dimmer's 1..254) the number says more
 		if x >= set.from - 0.25 and x <= set.to + 0.25 then
 			if set.name:lower() == "no feature" or set.to - set.from > 50 then return v end
-			return set.name
+			return v .. " " .. set.name -- MA: "0 Closed", "100 Open"
 		end
 	end
 	return v
