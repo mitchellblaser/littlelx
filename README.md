@@ -131,6 +131,16 @@ Follow the prompts: move each fader, turn and press each encoder, and press each
 key in the order you want them numbered. Press Enter to skip any control.
 Everything is saved to `~/.littlelx.json` (Windows: `C:\Users\<you>\.littlelx.json`).
 
+Then calibrate the faders' real bottom and top. Pull all faders down and tap
+**Next** on the screen (or press Enter), then push them all up and tap **Next**
+again. Each fader's live reading is shown while you do it:
+
+```sh
+python3 bridge/littlelx.py --faders       # Windows: littlelx.exe --faders
+```
+
+Re-run this whenever a fader doesn't quite reach 0 % or 100 %.
+
 Then calibrate the touchscreen (tap three crosses):
 
 ```sh

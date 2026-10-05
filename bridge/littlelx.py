@@ -8,6 +8,7 @@ This script turns faders/keys/encoders into OSC for MA3 and draws the screen.
   littlelx.py               run the bridge
   littlelx.py --learn       teach it which pin is which control
   littlelx.py --calibrate   calibrate the touchscreen
+  littlelx.py --faders      calibrate fader bottom/top (after --learn)
   littlelx.py --monitor     print everything the Mega sends
   littlelx.py --update-pi littlelx-pi-update.zip
                             update the touchscreen's firmware over USB
@@ -933,7 +934,76 @@ def learn(cfg):
 
     hw["pin_modes"] = pin_modes
     save_config(cfg)
-    print(f"\nSaved to {CONFIG_PATH}. Run without --learn to start the bridge.")
+    print(f"\nSaved to {CONFIG_PATH}.")
+    print("Next: run with --faders to calibrate the fader ends, then without options to start.")
+
+
+def calibrate_faders(cfg):
+    """Record each fader's real bottom and top reading (all faders at once)."""
+    hw = cfg["hw"]
+    faders = [(i, f) for i, f in enumerate(hw["faders"]) if f]
+    if not faders:
+        sys.exit("No faders learnt yet: run with --learn first.")
+    ser = connect(cfg)
+    start_thread(stdin_reader)
+    for pin, mode in hw["pin_modes"].items():  # quiet the unused analog pins
+        ser.send(f"M{pin} {mode}")
+    by_ch = {f["ch"]: i for i, f in faders}
+    latest = {}
+    NEXT = 1
+
+    def screen(title, button):
+        ser.send(">CLR")
+        ser.send(">BG 101418")
+        ser.send(f">W 0 L 0 0 320 70 1c2430 ffffff 1c2430 1 0 0 {esc(title)}")
+        for n, (i, f) in enumerate(faders):
+            ser.send(f">W {10 + n} V {6 + n * 63} 80 57 300 232b38 ffffff 2f7de1 0 0 0 F{i + 1}")
+        if button:
+            ser.send(f">W {NEXT} B 60 396 200 70 c08a1e ffffff c08a1e 1 0 0 {button}")
+
+    def step(title):
+        print(title.replace("\\n", " ") + ", then press Enter here or tap Next on the screen.")
+        screen(title, "Next")
+        ser.send("?")  # Mega replies with every current value
+        while True:
+            try:
+                kind, src, data = events.get(timeout=0.2)
+            except queue.Empty:
+                continue
+            if kind == "stdin":
+                return
+            if kind == "lost" and src is ser:
+                sys.exit("Controller disconnected.")
+            if kind != "mega" or src is not ser:
+                continue
+            if data == f">P {NEXT}":
+                return
+            m = re.match(r"A(\d+) (\d+)$", data)
+            if m and int(m.group(1)) in by_ch:
+                ch, v = int(m.group(1)), int(m.group(2))
+                latest[ch] = v
+                n = [i for i, _ in faders].index(by_ch[ch])
+                ser.send(f">V {10 + n} {v * 1000 // 1023}")
+                ser.send(f">T {10 + n} F{by_ch[ch] + 1}\\n{v}")
+
+    step("Pull ALL faders\\nfully DOWN")
+    lows = dict(latest)
+    step("Push ALL faders\\nfully UP")
+    highs = dict(latest)
+
+    print()
+    for i, f in faders:
+        lo, hi = lows.get(f["ch"]), highs.get(f["ch"])
+        if lo is None or hi is None or abs(hi - lo) < 300:
+            print(f"  Fader {i + 1} (A{f['ch']}): didn't move far enough (bottom {lo}, top {hi}), unchanged")
+            continue
+        margin = (hi - lo) * 0.015  # reach 0 % / 100 % without slamming the ends
+        f["lo"], f["hi"] = round(lo + margin), round(hi - margin)
+        note = "  (wired upside down - handled)" if hi < lo else ""
+        print(f"  Fader {i + 1} (A{f['ch']}): bottom {lo}, top {hi}{note}")
+    save_config(cfg)
+    screen("Faders calibrated", None)
+    print(f"Saved to {CONFIG_PATH}.")
 
 
 def calibrate(cfg):
@@ -1075,6 +1145,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--learn", action="store_true", help="learn the wiring")
     ap.add_argument("--calibrate", action="store_true", help="calibrate the touchscreen")
+    ap.add_argument("--faders", action="store_true", help="calibrate fader bottom/top")
     ap.add_argument("--monitor", action="store_true", help="print raw events")
     ap.add_argument("--port", help="serial port (default: auto-detect)")
     ap.add_argument("--update-pi", metavar="ZIP", help="update the touchscreen firmware")
@@ -1091,6 +1162,8 @@ def main():
             update_pi(cfg, args.update_pi)
         elif args.learn:
             learn(cfg)
+        elif args.faders:
+            calibrate_faders(cfg)
         elif args.calibrate:
             calibrate(cfg)
         elif args.monitor:
