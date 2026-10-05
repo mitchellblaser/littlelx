@@ -1094,6 +1094,20 @@ class Bridge:
             if cal:
                 self.to_pi("K " + " ".join(str(x) for x in cal))
             self.screen.draw()
+        elif parts[0] == "STAT":
+            st = dict(kv.split("=", 1) for kv in parts[1:] if "=" in kv)
+            errs = {k: int(v) for k, v in st.items() if k != "lines" and v.isdigit() and int(v)}
+            if errs and errs != getattr(self, "last_stat", None):
+                self.last_stat = errs
+                lines = int(st.get("lines", "0") or 0)
+                bad = errs.get("bad", 0)
+                print(f"Link to touchscreen: {bad} of {lines} lines damaged"
+                      f" ({100.0 * bad / max(lines, 1):.2f}%), UART frame errors {errs.get('frame', 0)},"
+                      f" overruns {errs.get('overrun', 0)}, buffer losses {errs.get('lost', 0)}")
+                if errs.get("frame"):
+                    print("  frame errors = electrical: check the Mega TX3 -> divider -> Pi RX wire and GND")
+                if errs.get("overrun") or errs.get("lost"):
+                    print("  overruns = the Pi was too busy to keep up (usually under-voltage throttling)")
         elif parts[0] == "INFO":
             print("Touchscreen status: " + " ".join(parts[1:]))
             if "fb=missing" in parts:

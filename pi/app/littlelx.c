@@ -33,6 +33,10 @@
  *   panel -> computer
  *     HELLO littlelx-pi 3 <w> <h> <version>   (3 = protocol version)
  *     INFO fb=<ok|missing> touch=<ok|missing>   (right after each HELLO)
+ *     STAT lines=<n> bad=<n> frame=<n> overrun=<n> lost=<n>
+ *                                         link quality, every 10 s while online
+ *                                         (bad = failed checksum, frame/overrun =
+ *                                         UART errors, lost = tty buffer full)
  *     P id / R id                         button press / release
  *     S id value                          bar dragged to value
  *     CALD a b c d e f                    calibration result (store it, send back with K)
@@ -43,6 +47,7 @@
 #include <fcntl.h>
 #include <ftw.h>
 #include <linux/fb.h>
+#include <linux/serial.h>
 #include <linux/input.h>
 #include <linux/watchdog.h>
 #include <poll.h>
@@ -855,6 +860,8 @@ static void upd_line(char *args)
 	}
 }
 
+static unsigned long lines_ok, lines_bad;
+
 /* Lines may end in "*hh" (XOR of the bytes before '*'). Returns 0 = drop. */
 static int checksum_ok(char *line)
 {
@@ -877,8 +884,11 @@ static void handle_line(char *line)
 	char *f[12];
 	widget_t *w;
 
-	if (!checksum_ok(line))
+	if (!checksum_ok(line)) {
+		lines_bad++;
 		return; /* damaged on the way: the bridge re-sends everything regularly */
+	}
+	lines_ok++;
 
 	last_rx = now_ms();
 	set_online(1);
@@ -1303,6 +1313,14 @@ static int app(void)
 		if (upd.active && t - upd.last_rx > 30000) {
 			klog("update timed out");
 			upd_close();
+		}
+		static long long last_stat;
+		if (online && tty >= 0 && t - last_stat > 10000) {
+			struct serial_icounter_struct ic = { 0 };
+			last_stat = t;
+			ioctl(tty, TIOCGICOUNT, &ic);
+			send_line("STAT lines=%lu bad=%lu frame=%d overrun=%d lost=%d", lines_ok + lines_bad,
+				  lines_bad, ic.frame, ic.overrun, ic.buf_overrun);
 		}
 		if (online && t - last_rx > 6000) {
 			set_online(0);
