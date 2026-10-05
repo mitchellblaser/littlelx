@@ -34,3 +34,19 @@ jobs:
         with:
           name: littlelx-mega-hex
           path: out/littlelx_mega.ino.hex
+
+  windows-bridge:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build littlelx.exe
+        run: |
+          python -m pip install pyserial pyinstaller
+          pyinstaller --onefile --console --name littlelx bridge/littlelx.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: littlelx-windows
+          path: dist/littlelx.exe

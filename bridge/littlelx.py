@@ -1,30 +1,38 @@
 #!/usr/bin/env python3
 """
-littlelx bridge: Arduino Mega (USB) <-> grandMA3 (OSC).
+littlelx bridge: Arduino Mega (USB) <-> grandMA3 (OSC). Mac, Windows, Linux.
 
 The Mega reports raw pin changes and relays the Raspberry Pi touchscreen.
 This script turns faders/keys/encoders into OSC for MA3 and draws the screen.
 
-  python3 littlelx.py               run the bridge
-  python3 littlelx.py --learn       teach it which pin is which control
-  python3 littlelx.py --calibrate   calibrate the touchscreen
-  python3 littlelx.py --monitor     print everything the Mega sends
+  littlelx.py               run the bridge
+  littlelx.py --learn       teach it which pin is which control
+  littlelx.py --calibrate   calibrate the touchscreen
+  littlelx.py --monitor     print everything the Mega sends
+  littlelx.py --port COM5   use a specific serial port
 
-No extra packages needed. Settings live in ~/.littlelx.json (created on first
-run, safe to hand-edit while the bridge is stopped).
+Needs pyserial on Windows (pip install pyserial); on Mac/Linux it works with
+plain Python 3 too. Settings live in ~/.littlelx.json (created on first run,
+safe to hand-edit while the bridge is stopped).
 """
 import argparse
 import copy
 import glob
 import json
 import os
+import queue
 import re
-import select
 import socket
 import struct
 import sys
-import termios
+import threading
 import time
+
+try:
+    import serial
+    import serial.tools.list_ports
+except ImportError:
+    serial = None
 
 CONFIG_PATH = os.path.expanduser("~/.littlelx.json")
 
@@ -39,12 +47,13 @@ CONFIG_PATH = os.path.expanduser("~/.littlelx.json")
 
 DEFAULTS = {
     "osc": {
-        "host": "127.0.0.1",      # MA3 machine (127.0.0.1 = MA3 onPC on this Mac)
+        "host": "127.0.0.1",      # MA3 machine (127.0.0.1 = MA3 onPC on this computer)
         "port": 8000,             # MA3: Menu > In & Out > OSC > Port
         "prefix": "/gma3",        # MA3 OSC line "Prefix" (gma3), "" if none
         "listen_port": 9000,      # MA3 "Send" destination port, for feedback
         "fader_type": "i",        # "i" (0..100 int) or "f" (0..100 float)
     },
+    "serial_port": "",            # "" = auto-detect, or e.g. "COM5" / "/dev/cu.usbmodem1101"
     "page": 1,
     "sync_page_to_ma": False,     # also send "Page N" to MA when paging
     "pickup": False,              # soft takeover when MA reports fader values
@@ -69,6 +78,8 @@ DEFAULTS = {
         {"label": "Go +", "cmd": "Go+", "color": "1f7a3a"},
         {"label": "Highlight", "cmd": "Highlight"},
         {"label": "Blackout", "cmd": "Blackout", "color": "7a1f2a"},
+        {"label": "Blind", "cmd": "Blind"},
+        {"label": "Freeze", "cmd": "Freeze"},
     ],
     # Filled in by --learn
     "hw": {
@@ -157,93 +168,147 @@ def osc_parse(data):
         return
 
 
+# ------------------------------------------------------------------ events
+#
+# Everything (serial lines, OSC packets, keyboard input) arrives on one queue,
+# fed by background threads. This works the same on Windows, Mac and Linux.
+
+events = queue.Queue()
+
+
+def start_thread(fn, *args):
+    t = threading.Thread(target=fn, args=args, daemon=True)
+    t.start()
+    return t
+
+
+def stdin_reader():
+    for line in sys.stdin:
+        events.put(("stdin", None, line))
+
+
 # ------------------------------------------------------------------ serial
 
-def find_port():
-    if os.environ.get("LITTLELX_PORT"):
-        return os.environ["LITTLELX_PORT"]
-    pats = ["/dev/cu.usbmodem*", "/dev/cu.usbserial*", "/dev/cu.wchusbserial*",
-            "/dev/ttyACM*", "/dev/ttyUSB*"]
-    for p in pats:
-        hits = sorted(glob.glob(p))
+USB_IDS = {0x2341, 0x2A03, 0x1A86, 0x0403, 0x10C4}  # Arduino, CH340, FTDI, CP210x
+
+
+def find_port(cfg):
+    if cfg.get("serial_port"):
+        return cfg["serial_port"]
+    if serial:
+        ports = list(serial.tools.list_ports.comports())
+        for p in ports:
+            if p.vid in USB_IDS or "arduino" in (p.description or "").lower():
+                return p.device
+    for pat in ["/dev/cu.usbmodem*", "/dev/cu.usbserial*", "/dev/cu.wchusbserial*",
+                "/dev/ttyACM*", "/dev/ttyUSB*"]:
+        hits = sorted(glob.glob(pat))
         if hits:
             return hits[0]
     return None
 
 
-class Serial:
-    def __init__(self, path):
-        self.fd = os.open(path, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
-        a = termios.tcgetattr(self.fd)
-        a[0] = 0                                            # iflag
-        a[1] = 0                                            # oflag
-        a[2] = termios.CS8 | termios.CREAD | termios.CLOCAL  # cflag
-        a[3] = 0                                            # lflag
-        a[4] = a[5] = termios.B115200
-        a[6][termios.VMIN] = 0
-        a[6][termios.VTIME] = 0
-        termios.tcsetattr(self.fd, termios.TCSANOW, a)
-        self.buf = b""
+class Port:
+    """Serial port to the Mega; a reader thread posts ("mega", port, line)."""
 
-    def lines(self):
-        try:
-            data = os.read(self.fd, 4096)
-        except BlockingIOError:
-            return []
+    def __init__(self, path):
+        self.path = path
+        self.closed = False
+        if serial:
+            self.s = serial.Serial(path, 115200, timeout=0.1)
+        else:  # stdlib fallback for Mac/Linux
+            import termios
+            self.fd = os.open(path, os.O_RDWR | os.O_NOCTTY)
+            a = termios.tcgetattr(self.fd)
+            a[0] = a[1] = a[3] = 0
+            a[2] = termios.CS8 | termios.CREAD | termios.CLOCAL
+            a[4] = a[5] = termios.B115200
+            a[6][termios.VMIN] = 0
+            a[6][termios.VTIME] = 1
+            termios.tcsetattr(self.fd, termios.TCSANOW, a)
+        self.lock = threading.Lock()
+        start_thread(self._reader)
+
+    def _read(self):
+        if serial:
+            return self.s.read(max(1, self.s.in_waiting))
+        import select
+        r, _, _ = select.select([self.fd], [], [], 0.2)
+        if not r:
+            return b""
+        data = os.read(self.fd, 4096)
         if not data:
-            raise OSError("serial port closed")
-        self.buf += data
-        *done, self.buf = self.buf.split(b"\n")
-        return [l.strip(b"\r").decode(errors="replace") for l in done if l.strip()]
+            raise OSError("device gone")
+        return data
+
+    def _reader(self):
+        buf = b""
+        try:
+            while not self.closed:
+                buf += self._read()
+                *done, buf = buf.split(b"\n")
+                for l in done:
+                    l = l.strip(b"\r")
+                    if l:
+                        events.put(("mega", self, l.decode(errors="replace")))
+        except Exception as e:  # unplugged
+            if not self.closed:
+                events.put(("lost", self, str(e)))
 
     def send(self, line):
         data = (line + "\n").encode(errors="replace")
-        while data:
-            try:
-                n = os.write(self.fd, data)
-                data = data[n:]
-            except BlockingIOError:
-                select.select([], [self.fd], [], 0.5)
+        with self.lock:
+            if serial:
+                self.s.write(data)
+            else:
+                while data:
+                    n = os.write(self.fd, data)
+                    data = data[n:]
 
     def close(self):
-        os.close(self.fd)
+        self.closed = True
+        try:
+            self.s.close() if serial else os.close(self.fd)
+        except Exception:
+            pass
 
 
-def connect(verbose=True):
-    """Open the Mega, wait for it to boot (opening the port resets it)."""
+def connect(cfg, verbose=True):
+    """Open the Mega and wait for it to boot (opening the port resets it)."""
     while True:
-        path = find_port()
+        path = find_port(cfg)
         if path:
             try:
-                s = Serial(path)
-                deadline = time.time() + 4
-                while time.time() < deadline:
-                    select.select([s.fd], [], [], 0.2)
-                    for l in s.lines():
-                        if l.startswith("HELLO littlelx-mega"):
-                            if verbose:
-                                print(f"Mega connected on {path}")
-                            return s
-                    if time.time() > deadline - 2:
-                        s.send("?")  # in case it did not reset
-                s.close()
+                p = Port(path)
+                start, asked = time.time(), False
+                while time.time() - start < 4:
+                    try:
+                        kind, src, line = events.get(timeout=0.2)
+                    except queue.Empty:
+                        kind = None
+                    if kind == "mega" and src is p and line.startswith("HELLO littlelx-mega"):
+                        print(f"Mega connected on {path}")
+                        return p
+                    if not asked and time.time() - start > 2:
+                        p.send("?")  # in case it did not reset
+                        asked = True
+                p.close()
                 if verbose:
                     print(f"{path}: no littlelx firmware answered (flash mega/littlelx_mega first)")
-            except OSError as e:
+            except Exception as e:
                 if verbose:
                     print(f"{path}: {e}")
         elif verbose:
-            print("Waiting for the Mega to be plugged in...")
+            print("Waiting for the controller to be plugged in...")
         verbose = False
         time.sleep(2)
 
 
 # -------------------------------------------------------------- touchscreen
 
-W, H = 480, 320
 C_BG, C_PANEL, C_TEXT, C_DIM = "101418", "1c2430", "ffffff", "8899aa"
 C_BTN, C_BTN_ON, C_BAR, C_BAR_BG = "2c3546", "c08a1e", "2f7de1", "232b38"
-C_OK, C_BAD = "38c172", "e0565b"
+C_KEY2, C_OK = "3a4458", "38c172"
 
 
 def esc(text):
@@ -251,12 +316,13 @@ def esc(text):
 
 
 class Screen:
-    """Builds the touchscreen pages out of Pi widgets."""
+    """Builds the touchscreen pages out of Pi widgets. Adapts to portrait or
+    landscape using the size the panel reports in its HELLO."""
     HDR_PAGE, HDR_MID, HDR_STATUS = 0, 1, 2
     FADER0 = 10
     BTN0 = 20
-    KEY0 = 40
     CMDLINE = 39
+    KEY0 = 40
 
     KEYPAD = [
         ["Fixture", "7", "8", "9", "Thru"],
@@ -271,6 +337,11 @@ class Screen:
         self.name = "main"
         self.cmdline = ""
         self.keymap = {}
+        self.w, self.h = 320, 480
+
+    @property
+    def portrait(self):
+        return self.h > self.w
 
     def send(self, line):
         self.b.to_pi(line)
@@ -278,14 +349,26 @@ class Screen:
     def widget(self, wid, kind, x, y, w, h, bg, fg, ac, font, align, value, text):
         self.send(f"W {wid} {kind} {x} {y} {w} {h} {bg} {fg} {ac} {font} {align} {value} {esc(text)}")
 
+    def header_h(self):
+        return 54 if self.portrait else 30
+
     def header(self):
-        self.widget(self.HDR_PAGE, "L", 0, 0, 120, 30, C_PANEL, C_TEXT, C_PANEL, 1, 1, 0, f"Page {self.b.page}")
-        self.widget(self.HDR_MID, "L", 120, 0, 220, 30, C_PANEL, C_DIM, C_PANEL, 0, 0, 0, self.b.last_cmd)
+        w = self.w
+        if self.portrait:
+            self.widget(self.HDR_PAGE, "L", 0, 0, w // 2, 30, C_PANEL, C_TEXT, C_PANEL, 1, 1, 0,
+                        f"Page {self.b.page}")
+            self.widget(self.HDR_MID, "L", 0, 30, w, 24, C_PANEL, C_DIM, C_PANEL, 0, 1, 0, self.b.last_cmd)
+        else:
+            self.widget(self.HDR_PAGE, "L", 0, 0, 120, 30, C_PANEL, C_TEXT, C_PANEL, 1, 1, 0,
+                        f"Page {self.b.page}")
+            self.widget(self.HDR_MID, "L", 120, 0, w - 260, 30, C_PANEL, C_DIM, C_PANEL, 0, 0, 0,
+                        self.b.last_cmd)
         self.status()
 
     def status(self):
         ok = self.b.ma_seen and time.time() - self.b.ma_seen < 5
-        self.widget(self.HDR_STATUS, "L", 340, 0, 140, 30, C_PANEL, C_OK if ok else C_DIM, C_PANEL,
+        x = self.w // 2 if self.portrait else self.w - 140
+        self.widget(self.HDR_STATUS, "L", x, 0, self.w - x, 30, C_PANEL, C_OK if ok else C_DIM, C_PANEL,
                     0, 2, 0, "MA3 online" if ok else f"OSC > {self.b.cfg['osc']['host']}")
 
     def draw(self):
@@ -298,28 +381,45 @@ class Screen:
             self.draw_main()
 
     def draw_main(self):
+        w, h = self.w, self.h
+        top = self.header_h() + 6
+        fh = 180 if self.portrait else 150
+        fw = (w - 4) // 5
         for i in range(5):
-            self.widget(self.FADER0 + i, "v", 4 + i * 95, 36, 92, 150, C_BAR_BG, C_TEXT, C_BAR,
+            self.widget(self.FADER0 + i, "v", 4 + i * fw, top, fw - 3, fh, C_BAR_BG, C_TEXT, C_BAR,
                         0, 0, self.fader_value(i), self.fader_text(i))
+        cols = 3 if self.portrait else 5
+        rows = 4 if self.portrait else 2
+        btns = self.b.cfg["touch_buttons"][:cols * rows]
+        by = top + fh + 6
+        bw = (w - 4) // cols
+        bh = (h - by - 2) // rows
         self.keymap = {}
-        for n, btn in enumerate(self.b.cfg["touch_buttons"][:10]):
-            r, c = divmod(n, 5)
+        for n, btn in enumerate(btns):
+            r, c = divmod(n, cols)
             wid = self.BTN0 + n
             self.keymap[wid] = btn
-            self.widget(wid, "B", 4 + c * 95, 192 + r * 64, 92, 58, btn.get("color", C_BTN),
+            self.widget(wid, "B", 4 + c * bw, by + r * bh, bw - 3, bh - 6, btn.get("color", C_BTN),
                         C_TEXT, C_BTN_ON, 1, 0, 0, btn.get("label", "?"))
 
     def draw_keypad(self):
+        w, h = self.w, self.h
+        top = self.header_h() + 4
         self.keymap = {}
-        self.widget(self.CMDLINE, "L", 4, 34, 472, 36, "000000", "ffd36b", "000000", 1, 1, 0,
+        self.widget(self.CMDLINE, "L", 4, top, w - 8, 40, "000000", "ffd36b", "000000", 1, 1, 0,
                     self.cmdline + "_")
+        ky = top + 44
+        bw = (w - 4) // 5
+        bh = (h - ky - 2) // 5
         for r, row in enumerate(self.KEYPAD):
             for c, label in enumerate(row):
                 wid = self.KEY0 + r * 5 + c
                 self.keymap[wid] = {"key": label}
-                color = C_BTN_ON if label == "Please" else "3a4458" if not label.isdigit() and label != "." else C_BTN
-                self.widget(wid, "B", 4 + c * 95, 74 + r * 49, 92, 45, color, C_TEXT, C_BTN_ON,
-                            1, 0, 0, label)
+                digit = label.isdigit() or label == "."
+                color = C_BTN_ON if label == "Please" else C_BTN if digit else C_KEY2
+                font = 0 if self.portrait and len(label) > 3 else 1
+                self.widget(wid, "B", 4 + c * bw, ky + r * bh, bw - 3, bh - 4, color, C_TEXT, C_BTN_ON,
+                            font, 0, 0, label)
 
     def fader_value(self, i):
         v = self.b.fader_pos[i]
@@ -327,12 +427,15 @@ class Screen:
 
     def fader_text(self, i):
         f = self.b.cfg["faders"][i]
-        name = self.b.ma_names.get((self.b.page, f["exec"])) or f.get("name") or f"Exec {f['exec']}"
+        default = str(f["exec"]) if self.portrait else f"Exec {f['exec']}"
+        name = self.b.ma_names.get((self.b.page, f["exec"])) or f.get("name") or default
+        if self.portrait:
+            name = name[:7]
         v = self.b.fader_pos[i]
         pct = "--" if v is None else f"{round(v)}%"
         hint = ""
         if self.b.pickup_pending[i] is not None:
-            hint = "  ^" if self.b.pickup_pending[i] > (v or 0) else "  v"
+            hint = " ^" if self.b.pickup_pending[i] > (v or 0) else " v"
         return f"{name}\n{pct}{hint}"
 
     def update_fader(self, i):
@@ -427,13 +530,24 @@ class Bridge:
 
         o = cfg["osc"]
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        try:
-            self.sock.bind(("0.0.0.0", int(o["listen_port"])))
-        except OSError as e:
-            print(f"Can't listen for MA feedback on port {o['listen_port']}: {e}")
-        self.sock.setblocking(False)
         self.dest = (o["host"], int(o["port"]))
         self.prefix = o["prefix"].rstrip("/")
+        try:
+            rx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            rx.bind(("0.0.0.0", int(o["listen_port"])))
+            start_thread(self.osc_reader, rx)
+        except OSError as e:
+            print(f"Can't listen for MA feedback on port {o['listen_port']}: {e}")
+
+    @staticmethod
+    def osc_reader(rx):
+        while True:
+            try:
+                data, _ = rx.recvfrom(65536)
+            except OSError:
+                continue  # Windows reports ICMP errors here; ignore
+            for msg in osc_parse(data):
+                events.put(("osc", None, msg))
 
     def build_maps(self):
         hw = self.cfg["hw"]
@@ -466,20 +580,21 @@ class Bridge:
         self.last_cmd = cmd
         print(f"cmd: {cmd}")
         if self.pi_ready:
-            self.send_pi(f"T {Screen.HDR_MID} {esc(cmd)}")
+            self.to_pi(f"T {Screen.HDR_MID} {esc(cmd)}")
 
     def to_pi(self, line):
         if self.ser:
-            self.ser.send(">" + line)
-
-    send_pi = to_pi
+            try:
+                self.ser.send(">" + line)
+            except Exception:
+                pass  # reader thread reports the disconnect
 
     def send_fader(self, i, value):
         ex = self.cfg["faders"][i]["exec"]
         v = round(value) if self.cfg["osc"]["fader_type"] == "i" else float(round(value, 1))
         self.osc(f"/Page{self.page}/Fader{ex}", v)
 
-    def do_action(self, act, down, exec_override=None):
+    def do_action(self, act, down):
         if "exec" in act:
             self.osc(f"/Page{self.page}/Key{act['exec']}", 1 if down else 0)
         elif not down:
@@ -582,7 +697,9 @@ class Bridge:
         if not parts:
             return
         if parts[0] == "HELLO":
-            print("Touchscreen connected")
+            if len(parts) >= 5:
+                self.screen.w, self.screen.h = int(parts[3]), int(parts[4])
+            print(f"Touchscreen connected ({self.screen.w}x{self.screen.h})")
             self.pi_ready = True
             cal = self.cfg.get("touch_cal")
             if cal:
@@ -626,70 +743,72 @@ class Bridge:
                     self.screen.update_fader(i)
 
     # ---- main loop
-    def start_session(self):
-        for pin, mode in self.cfg["hw"]["pin_modes"].items():
-            self.ser.send(f"M{pin} {mode}")
-        self.ser.send("?")
-        self.to_pi("?")
-
     def run(self):
         last_ping = last_status = 0
         while True:
-            self.ser = connect()
+            self.ser = connect(self.cfg)
             self.pi_ready = False
-            self.start_session()
-            try:
-                while True:
-                    r, _, _ = select.select([self.ser.fd, self.sock], [], [], 0.1)
-                    if self.ser.fd in r:
-                        for line in self.ser.lines():
-                            self.on_mega(line)
-                    if self.sock in r:
-                        while True:
-                            try:
-                                data, _ = self.sock.recvfrom(65536)
-                            except BlockingIOError:
-                                break
-                            for addr, args in osc_parse(data):
-                                self.on_osc(addr, args)
-                    now = time.time()
-                    if now - last_ping > 1:
-                        last_ping = now
-                        self.to_pi("PING")
-                    if now - last_status > 2 and self.pi_ready:
-                        last_status = now
-                        self.screen.status()
-            except OSError as e:
-                print(f"Mega disconnected ({e}), reconnecting...")
+            for pin, mode in self.cfg["hw"]["pin_modes"].items():
+                self.ser.send(f"M{pin} {mode}")
+            self.ser.send("?")
+            self.to_pi("?")
+            while True:
                 try:
+                    kind, src, data = events.get(timeout=0.1)
+                except queue.Empty:
+                    kind = None
+                if kind == "mega" and src is self.ser:
+                    self.on_mega(data)
+                elif kind == "osc":
+                    self.on_osc(*data)
+                elif kind == "lost" and src is self.ser:
+                    print(f"Controller disconnected ({data}), reconnecting...")
                     self.ser.close()
-                except OSError:
-                    pass
-                self.ser = None
-                time.sleep(1)
+                    self.ser = None
+                    time.sleep(1)
+                    break
+                now = time.time()
+                if now - last_ping > 1:
+                    last_ping = now
+                    self.to_pi("PING")
+                if now - last_status > 2 and self.pi_ready:
+                    last_status = now
+                    self.screen.status()
 
 
 # ------------------------------------------------------------------- tools
 
 def wait_event(ser, accept, timeout=None):
-    """Wait for a Mega line accepted by accept(); Enter on stdin returns None."""
+    """Wait for a Mega line accepted by accept(); Enter on the keyboard returns None."""
     end = time.time() + timeout if timeout else None
     while True:
-        r, _, _ = select.select([ser.fd, sys.stdin], [], [], 0.1)
-        if sys.stdin in r:
-            sys.stdin.readline()
+        try:
+            kind, src, data = events.get(timeout=0.1)
+        except queue.Empty:
+            kind = None
+        if kind == "stdin":
             return None
-        if ser.fd in r:
-            for line in ser.lines():
-                res = accept(line)
-                if res is not None:
-                    return res
+        if kind == "lost" and src is ser:
+            sys.exit("Controller disconnected.")
+        if kind == "mega" and src is ser:
+            res = accept(data)
+            if res is not None:
+                return res
         if end and time.time() > end:
             return None
 
 
+def drain():
+    while True:
+        try:
+            events.get_nowait()
+        except queue.Empty:
+            return
+
+
 def learn(cfg):
-    ser = connect()
+    ser = connect(cfg)
+    start_thread(stdin_reader)
     hw = cfg["hw"]
     pin_modes = {}
     print("\nlittlelx learn mode. Press Enter at any prompt to skip that control.\n")
@@ -698,7 +817,7 @@ def learn(cfg):
     for ch in range(16):
         ser.send(f"M{54 + ch} 3")
     time.sleep(0.3)
-    ser.lines()
+    drain()
 
     # ---- faders
     used_ch = set()
@@ -734,7 +853,7 @@ def learn(cfg):
         pin_modes[str(54 + ch)] = mode
         ser.send(f"M{54 + ch} {mode}")
     time.sleep(0.3)
-    ser.lines()
+    drain()
 
     used_pins = set()
 
@@ -769,13 +888,12 @@ def learn(cfg):
             if p in state:
                 state[p] = v
                 total += enc.update(state[a], state[b])
-        steps = sum(1 for p, _ in seq if p in (a, b))
         e = {"a": a, "b": b, "push": None, "div": 4, "reverse": total < 0}
         used_pins.update((a, b))
         for p in (a, b):
             pin_modes[str(p)] = 10  # pullup, no debounce
             ser.send(f"M{p} 10")
-        print(f"  -> pins {a}/{b}" + (" (reversed)" if total < 0 else "") + f", {steps} edges")
+        print(f"  -> pins {a}/{b}" + (" (reversed)" if total < 0 else ""))
         print(f"Encoder {i + 1}: now press it (push button), or Enter if it has none.")
         p = wait_event(ser, press)
         if p is not None:
@@ -796,7 +914,7 @@ def learn(cfg):
         used_pins.add(p)
         print(f"  -> pin {p}")
         time.sleep(0.15)
-        ser.lines()
+        drain()
 
     hw["pin_modes"] = pin_modes
     save_config(cfg)
@@ -804,7 +922,7 @@ def learn(cfg):
 
 
 def calibrate(cfg):
-    ser = connect()
+    ser = connect(cfg)
     ser.send(">CAL")
     print("Tap the three crosses on the touchscreen...")
 
@@ -823,14 +941,19 @@ def calibrate(cfg):
         print("No calibration received.")
 
 
-def monitor():
-    ser = connect()
+def monitor(cfg):
+    ser = connect(cfg)
     ser.send("?")
     ser.send(">?")
     while True:
-        select.select([ser.fd], [], [], 1)
-        for line in ser.lines():
-            print(line)
+        try:
+            kind, src, data = events.get(timeout=1)
+        except queue.Empty:
+            continue
+        if kind == "mega":
+            print(data)
+        elif kind == "lost":
+            sys.exit("Controller disconnected.")
 
 
 def main():
@@ -838,18 +961,25 @@ def main():
     ap.add_argument("--learn", action="store_true", help="learn the wiring")
     ap.add_argument("--calibrate", action="store_true", help="calibrate the touchscreen")
     ap.add_argument("--monitor", action="store_true", help="print raw events")
+    ap.add_argument("--port", help="serial port (default: auto-detect)")
     args = ap.parse_args()
     cfg = load_config()
+    if args.port:
+        cfg["serial_port"] = args.port
+    elif os.environ.get("LITTLELX_PORT"):
+        cfg["serial_port"] = os.environ["LITTLELX_PORT"]
+    if os.name == "nt" and not serial:
+        sys.exit("On Windows this needs pyserial:  py -m pip install pyserial")
     try:
         if args.learn:
             learn(cfg)
         elif args.calibrate:
             calibrate(cfg)
         elif args.monitor:
-            monitor()
+            monitor(cfg)
         else:
             if not any(cfg["hw"]["faders"] + cfg["hw"]["keys"]):
-                print("No wiring learnt yet: run  python3 littlelx.py --learn  first.")
+                print("No wiring learnt yet: run with --learn first.")
             print(f"Sending OSC to {cfg['osc']['host']}:{cfg['osc']['port']} prefix '{cfg['osc']['prefix']}'")
             Bridge(cfg).run()
     except KeyboardInterrupt:

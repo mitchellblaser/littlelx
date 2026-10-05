@@ -778,28 +778,41 @@ static int test_render(const char *out)
 	return 0;
 }
 
+static void klog(const char *msg);
+
 static int app(void)
 {
 	const char *ttyp = getenv("LLX_TTY") ? getenv("LLX_TTY") : "/dev/ttyAMA0";
 	const char *fbp = getenv("LLX_FB") ? getenv("LLX_FB") : "/dev/fb0";
 	int fb = -1;
 
+	klog("app starting");
+
 	/* fbtft may probe a moment after we start */
 	for (int i = 0; i < 100 && (fb = open_fb(fbp)) < 0; i++)
 		usleep(100000);
+	klog(fb >= 0 ? "framebuffer ok" : "no framebuffer");
 	back = calloc(W * H, 2);
 	shadow = calloc(W * H, 2);
 	if (!back || !shadow)
 		return 1;
 	memset(shadow, 0x55, W * H * 2); /* force first full paint */
 
-	wdog = open("/dev/watchdog", O_WRONLY | O_CLOEXEC);
+	/* LLX_NOWDOG=1 on the kernel command line skips it (QEMU resets at once) */
+	wdog = getenv("LLX_NOWDOG") ? -1 : open("/dev/watchdog", O_WRONLY | O_CLOEXEC);
 	if (wdog >= 0) {
 		int t = 10;
 		ioctl(wdog, WDIOC_SETTIMEOUT, &t);
 	}
 	tty = open_tty(ttyp);
 	touch = open_touch();
+	int klog = open("/dev/kmsg", O_WRONLY | O_CLOEXEC);
+	if (klog >= 0) {
+		dprintf(klog, "littlelx: %dx%d fb=%s tty=%s touch=%s watchdog=%s\n", W, H,
+			fbmem ? "ok" : "MISSING", tty >= 0 ? "ok" : "MISSING",
+			touch >= 0 ? "ok" : "MISSING", wdog >= 0 ? "ok" : "none");
+		close(klog);
+	}
 	mark_all();
 	flush();
 
@@ -844,9 +857,19 @@ static int app(void)
 
 /* --------------------------------------------------------------- PID 1 */
 
+static void klog(const char *msg)
+{
+	int fd = open("/dev/kmsg", O_WRONLY | O_CLOEXEC);
+	if (fd >= 0) {
+		dprintf(fd, "littlelx: %s\n", msg);
+		close(fd);
+	}
+}
+
 static void pid1(void)
 {
 	mount("devtmpfs", "/dev", "devtmpfs", 0, NULL);
+	klog("init started");
 	mount("proc", "/proc", "proc", 0, NULL);
 	mount("sysfs", "/sys", "sysfs", 0, NULL);
 	mount("tmpfs", "/tmp", "tmpfs", 0, NULL);
@@ -876,8 +899,11 @@ static void pid1(void)
 
 int main(int argc, char **argv)
 {
-	if (argc == 3 && !strcmp(argv[1], "--render"))
+	if (argc >= 3 && !strcmp(argv[1], "--render")) { /* --render out.ppm [WxH] */
+		if (argc == 4)
+			sscanf(argv[3], "%dx%d", &W, &H);
 		return test_render(argv[2]);
+	}
 	if (getpid() == 1)
 		pid1();
 	return app();

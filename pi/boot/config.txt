@@ -12,10 +12,12 @@ camera_auto_detect=0
 display_auto_detect=0
 
 # ---- Display: Waveshare 3.5" (A) / LCD-show style ILI9486 + XPT2046 touch ----
-# rotate=90 or 270 = landscape (swap them if the picture is upside down).
+# rotate=0 or 180 = portrait (swap them if the picture is upside down),
+# 90 or 270 = landscape. The touchscreen layout follows automatically
+# (re-run the touch calibration after changing it).
 # Garbled picture? lower speed to 16000000. Want it snappier? try 32000000.
 dtparam=spi=on
-dtoverlay=piscreen,speed=24000000,rotate=90,fps=50
+dtoverlay=piscreen,speed=24000000,rotate=0,fps=50
 
 # ---- UART to the Mega: GPIO14 = Pi TX, GPIO15 = Pi RX, 115200 baud ----
 # Bluetooth gives the good UART back to the header; wifi is off to save power.
