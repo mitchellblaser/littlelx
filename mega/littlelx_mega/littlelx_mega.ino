@@ -23,8 +23,8 @@
  *     ><text>             line from the Pi
  *   computer -> Mega
  *     ?                   HELLO, PI and a dump of every input
- *     M<pin> <mode>       0 off, 1 input, 2 input+pullup, 3 analog (A0-A15 only)
- *                         add 8 for no debounce (rotary encoders)
+ *     M<pin> <mode>       0 off, 1 input, 2 input+pullup, 3 analog (A0-A15 only),
+ *                         4 key-matrix line; add 8 for no debounce (encoders)
  *     ><text>             send line to the Pi (streamed through byte by byte,
  *                         so lines of any length and full-speed updates work)
  *     X                   matrix probe (diagnostics, raw, no debounce):
@@ -42,8 +42,10 @@
  * a pin driven by something (a fader wiper) stays analog; a floating one (a
  * matrix line, a button to GND, or nothing) becomes input+pullup, so key
  * matrices on analog pins are scanned too. A learned setup in EEPROM wins.
- * Matrix scanning uses every pin in mode 2 (pullup, debounced); encoders
- * (mode 10) and analog pins are left out.
+ * Matrix scanning: once any pin is in mode 4 (the computer sets that after
+ * learning), only mode-4 pins are scanned, the whole matrix every loop
+ * (~0.5 ms). Before that, every mode-2 pin is tried, one per loop, so
+ * matrices can be discovered. Keys are debounced by time (5 ms).
  * Pins 0/1 (USB) and 14/15 (Pi) are not scanned; everything else is.
  */
 
@@ -57,7 +59,7 @@
 #define PI_TX 14
 #define PI_RX 15
 
-enum { M_OFF = 0, M_INPUT = 1, M_PULLUP = 2, M_ANALOG = 3, M_RAW = 8 };
+enum { M_OFF = 0, M_INPUT = 1, M_PULLUP = 2, M_ANALOG = 3, M_MATRIX = 4, M_RAW = 8 };
 
 static uint8_t mode[NPINS];
 static volatile uint8_t *pinreg[NPINS];
@@ -66,12 +68,13 @@ static volatile uint8_t *portreg[NPINS], *ddrreg[NPINS];
 
 /* matrix scanning */
 #define MX_MAX 24                 /* keys tracked at once */
-#define MX_PRESS 2                /* full scans a key must be seen to count */
-#define MX_RELEASE 2              /* full scans it must be gone to release */
+#define MX_PRESS_MS 5             /* closed this long = pressed */
+#define MX_RELEASE_MS 8           /* open this long = released */
 static uint8_t mx_pins[NPINS], mx_n, mx_idx;
 static bool mx_dirty = true;
+static bool mx_known;             /* matrix lines known (mode 4): fast scan */
 static uint8_t mx_found[MX_MAX][2], mx_nfound;
-static struct { uint8_t a, b, seen, missed, down; } mx_keys[MX_MAX];
+static struct { uint8_t a, b, down; uint16_t since, last; } mx_keys[MX_MAX];
 static uint8_t mx_nkeys;
 static uint8_t state[NPINS];      /* reported state */
 static uint8_t lastread[NPINS];
@@ -107,7 +110,7 @@ static void apply_mode(uint8_t p)
 		else
 			*didr &= ~_BV(ch & 7);
 	}
-	pinMode(p, m == M_PULLUP ? INPUT_PULLUP : INPUT);
+	pinMode(p, (m == M_PULLUP || m == M_MATRIX) ? INPUT_PULLUP : INPUT);
 	state[p] = lastread[p] = (*pinreg[p] & pinmask[p]) ? 1 : 0;
 }
 
@@ -143,7 +146,7 @@ static void dump_all()
 	Serial.println(F("PI 3"));
 	Serial.print(F("MX"));
 	for (uint8_t p = 2; p < NPINS; p++)
-		if (mode[p] == M_PULLUP && !pin_reserved(p)) {
+		if ((mode[p] == M_PULLUP || mode[p] == M_MATRIX) && !pin_reserved(p)) {
 			Serial.print(' ');
 			Serial.print(p);
 		}
@@ -174,20 +177,24 @@ static uint8_t hexval(char c)
 	return c <= '9' ? c - '0' : (c | 0x20) - 'a' + 10;
 }
 
-static bool drive_low_and_read(uint8_t p, uint8_t *follow, uint8_t *nf);
+static bool drive_low_and_read(uint8_t p, const uint8_t *pins, uint8_t n, uint8_t *follow, uint8_t *nf);
 
 static void probe()
 {
 	Serial.print(F("XR"));
 	for (uint8_t p = 2; p < NPINS; p++)
-		if (mode[p] == M_PULLUP && !pin_reserved(p) && !(*pinreg[p] & pinmask[p])) {
+		if ((mode[p] == M_PULLUP || mode[p] == M_MATRIX) && !pin_reserved(p) && !(*pinreg[p] & pinmask[p])) {
 			Serial.print(' ');
 			Serial.print(p);
 		}
 	Serial.println();
-	uint8_t follow[NPINS], nf;
-	for (uint8_t p = 2; p < NPINS; p++) {
-		if (mode[p] != M_PULLUP || pin_reserved(p) || !drive_low_and_read(p, follow, &nf) || !nf)
+	uint8_t follow[NPINS], nf, all[NPINS], n = 0;
+	for (uint8_t p = 2; p < NPINS; p++)
+		if ((mode[p] == M_PULLUP || mode[p] == M_MATRIX) && !pin_reserved(p))
+			all[n++] = p;
+	for (uint8_t k = 0; k < n; k++) {
+		uint8_t p = all[k];
+		if (!drive_low_and_read(p, all, n, follow, &nf) || !nf)
 			continue;
 		Serial.print('X');
 		Serial.print(p);
@@ -302,7 +309,7 @@ static void scan_digital()
 	uint16_t now = millis();
 	for (uint8_t p = 2; p < NPINS; p++) {
 		uint8_t m = mode[p];
-		if ((m & 7) == M_OFF || (m & 7) == M_ANALOG || pin_reserved(p))
+		if ((m & 7) == M_OFF || (m & 7) == M_ANALOG || m == M_MATRIX || pin_reserved(p))
 			continue;
 		uint8_t v = (*pinreg[p] & pinmask[p]) ? 1 : 0;
 		if (m & M_RAW) {
@@ -335,71 +342,72 @@ static void mx_note(uint8_t a, uint8_t b)
 	}
 }
 
-/* End of a full scan: debounce what was found against what is tracked. */
+/* End of a full scan: debounce what was found against what is tracked,
+ * by time: closed for MX_PRESS_MS = pressed, open for MX_RELEASE_MS = released. */
 static void mx_cycle_done()
 {
-	for (uint8_t i = 0; i < mx_nkeys; i++) {
-		bool hit = false;
+	uint16_t now = millis();
+	for (uint8_t i = 0; i < mx_nkeys; i++)
 		for (uint8_t j = 0; j < mx_nfound; j++)
 			if (mx_found[j][0] == mx_keys[i].a && mx_found[j][1] == mx_keys[i].b) {
-				hit = true;
+				mx_keys[i].last = now;
 				mx_found[j][0] = 0xff; /* consumed */
 			}
-		if (hit) {
-			mx_keys[i].missed = 0;
-			if (mx_keys[i].seen < 255)
-				mx_keys[i].seen++;
-		} else {
-			mx_keys[i].seen = 0;
-			mx_keys[i].missed++;
-		}
-	}
-	for (uint8_t j = 0; j < mx_nfound; j++) /* newly seen pairs */
+	for (uint8_t j = 0; j < mx_nfound; j++) /* newly closed pairs */
 		if (mx_found[j][0] != 0xff && mx_nkeys < MX_MAX) {
 			mx_keys[mx_nkeys].a = mx_found[j][0];
 			mx_keys[mx_nkeys].b = mx_found[j][1];
-			mx_keys[mx_nkeys].seen = 1;
-			mx_keys[mx_nkeys].missed = 0;
+			mx_keys[mx_nkeys].since = mx_keys[mx_nkeys].last = now;
 			mx_keys[mx_nkeys].down = 0;
 			mx_nkeys++;
 		}
 	for (uint8_t i = 0; i < mx_nkeys;) {
-		if (!mx_keys[i].down && mx_keys[i].seen >= MX_PRESS) {
+		bool closed = mx_keys[i].last == now;
+		uint16_t open_for = now - mx_keys[i].last;
+		if (closed && !mx_keys[i].down && (uint16_t)(now - mx_keys[i].since) >= MX_PRESS_MS) {
 			mx_keys[i].down = 1;
 			report_key(i);
-		} else if (mx_keys[i].down && mx_keys[i].missed >= MX_RELEASE) {
-			mx_keys[i].down = 0;
-			report_key(i);
 		}
-		if (!mx_keys[i].down && mx_keys[i].missed >= MX_RELEASE)
+		if (!closed && open_for >= MX_RELEASE_MS) {
+			if (mx_keys[i].down) {
+				mx_keys[i].down = 0;
+				report_key(i);
+			}
 			mx_keys[i] = mx_keys[--mx_nkeys]; /* forget it */
-		else
-			i++;
+			continue;
+		}
+		if (!closed && !mx_keys[i].down)
+			mx_keys[i].since = now; /* bounced open before it counted: start over */
+		i++;
 	}
 	mx_nfound = 0;
 }
 
-/* Pull pin p LOW for a moment and list the other candidate pins (high at
+/* Pull pin p LOW for a moment and list the other pins of pins[] (high at
  * rest) that follow it. Returns false if p itself is low at rest. */
-static bool drive_low_and_read(uint8_t p, uint8_t *follow, uint8_t *nf)
+static bool drive_low_and_read(uint8_t p, const uint8_t *pins, uint8_t n, uint8_t *follow, uint8_t *nf)
 {
 	*nf = 0;
 	if (!(*pinreg[p] & pinmask[p]))
 		return false;
 	uint8_t rest[NPINS / 8 + 1] = { 0 };
-	for (uint8_t q = 2; q < NPINS; q++)
-		if (mode[q] == M_PULLUP && !pin_reserved(q) && (*pinreg[q] & pinmask[q]))
+	for (uint8_t k = 0; k < n; k++) {
+		uint8_t q = pins[k];
+		if (*pinreg[q] & pinmask[q])
 			rest[q >> 3] |= 1 << (q & 7);
+	}
 	uint8_t m = pinmask[p];
 	uint8_t sreg = SREG;
 	cli();
 	*portreg[p] &= ~m; /* pull-up off ... */
 	*ddrreg[p] |= m;   /* ... then drive low */
 	SREG = sreg;
-	delayMicroseconds(10);
-	for (uint8_t q = 2; q < NPINS; q++)
+	delayMicroseconds(6);
+	for (uint8_t k = 0; k < n; k++) {
+		uint8_t q = pins[k];
 		if (q != p && (rest[q >> 3] & (1 << (q & 7))) && !(*pinreg[q] & pinmask[q]))
 			follow[(*nf)++] = q;
+	}
 	sreg = SREG;
 	cli();
 	*ddrreg[p] &= ~m;  /* back to input ... */
@@ -409,13 +417,25 @@ static bool drive_low_and_read(uint8_t p, uint8_t *follow, uint8_t *nf)
 	return true;
 }
 
-/* Drive one candidate pin LOW per call and see which others follow. */
+static void mx_drive(uint8_t p)
+{
+	uint8_t follow[NPINS], nf;
+	if (drive_low_and_read(p, mx_pins, mx_n, follow, &nf))
+		for (uint8_t i = 0; i < nf; i++)
+			mx_note(p, follow[i]);
+}
+
+/* Known matrix: scan it all every call. Discovery: one candidate per call. */
 static void scan_matrix()
 {
 	if (mx_dirty) {
+		mx_known = false;
+		for (uint8_t p = 2; p < NPINS; p++)
+			if (mode[p] == M_MATRIX && !pin_reserved(p))
+				mx_known = true;
 		mx_n = 0;
 		for (uint8_t p = 2; p < NPINS; p++)
-			if (mode[p] == M_PULLUP && !pin_reserved(p))
+			if (mode[p] == (mx_known ? M_MATRIX : M_PULLUP) && !pin_reserved(p))
 				mx_pins[mx_n++] = p;
 		mx_idx = 0;
 		mx_nfound = 0;
@@ -423,12 +443,13 @@ static void scan_matrix()
 	}
 	if (mx_n < 2)
 		return;
-	uint8_t p = mx_pins[mx_idx];
-	uint8_t follow[NPINS], nf;
-	if (drive_low_and_read(p, follow, &nf))
-		for (uint8_t i = 0; i < nf; i++)
-			if (mode[follow[i]] == M_PULLUP)
-				mx_note(p, follow[i]);
+	if (mx_known) {
+		for (uint8_t k = 0; k < mx_n; k++)
+			mx_drive(mx_pins[k]);
+		mx_cycle_done();
+		return;
+	}
+	mx_drive(mx_pins[mx_idx]);
 	if (++mx_idx >= mx_n) {
 		mx_idx = 0;
 		mx_cycle_done();
@@ -539,7 +560,7 @@ void setup()
 			mode[p] = M_PULLUP;
 		if (learned) {
 			uint8_t m = EEPROM.read(2 + p); /* learned setup */
-			if (m != 0xff && (m & 7) <= M_ANALOG && !((m & 7) == M_ANALOG && p < 54))
+			if (m != 0xff && (m & 7) <= M_MATRIX && !((m & 7) == M_ANALOG && p < 54))
 				mode[p] = m;
 		}
 		apply_mode(p);

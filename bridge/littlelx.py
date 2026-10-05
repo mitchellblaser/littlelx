@@ -488,6 +488,20 @@ def mega_write(ser, addr, data):
             raise TimeoutError("EEPROM write not confirmed")
 
 
+def matrix_modes(cfg):
+    """Mark the learned key-matrix lines as mode 4: the Mega then scans only
+    those, the whole matrix every loop (fast). Returns True if anything changed."""
+    hw = cfg["hw"]
+    pairs = [k["pair"] for k in hw["keys"] if k and "pair" in k]
+    pairs += [e["push"] for e in hw["encoders"] if e and isinstance(e.get("push"), list)]
+    changed = False
+    for pin in {p for pair in pairs for p in pair}:
+        if hw["pin_modes"].get(str(pin)) != 4:
+            hw["pin_modes"][str(pin)] = 4
+            changed = True
+    return changed
+
+
 def learned(cfg):
     hw = cfg["hw"]
     return any(hw["faders"] + hw["keys"] + hw["encoders"])
@@ -977,6 +991,21 @@ class Bridge:
             return
         verb = {"Please": "please", "Clear": "clear", "<-": "back"}.get(k)
         self.ma_plugin(verb or f"type {k}")
+        # Show the expected result straight away; MA's real line follows.
+        t = self.ma["cmdline"]
+        if k in ("Please", "Clear"):
+            t = ""
+        elif k == "<-":
+            t = re.sub(r"\s*\S+\s*$", "", t)
+            t = t + " " if t else ""
+        else:
+            numeric = re.fullmatch(r"[\d.]+", k) is not None
+            if t and not t.endswith(" ") and not numeric:
+                t += " "
+            t += k + ("" if numeric else " ")
+        self.ma["cmdline"] = t
+        if self.pi_ready:
+            self.screen.update_cmdline()
 
     def install_ma3(self):
         """Put the littlelx code into MA3 over OSC and start it (no import needed)."""
@@ -1296,6 +1325,10 @@ class Bridge:
                 continue
             if not learned(self.cfg):
                 print("No wiring learnt yet: run with --learn.")
+            if matrix_modes(self.cfg):  # setups learned before fast matrix scanning
+                print("Switching the key matrix to fast scanning...")
+                save_config(self.cfg)
+                save_to_mega(self.cfg, self.ser)
             for pin, mode in self.cfg["hw"]["pin_modes"].items():
                 self.ser.send(f"M{pin} {mode}")
             self.ser.send("?")
@@ -1487,6 +1520,9 @@ def learn(cfg):
         drain()
 
     hw["pin_modes"] = pin_modes
+    matrix_modes(cfg)
+    for pin, mode in hw["pin_modes"].items():
+        ser.send(f"M{pin} {mode}")
     save_config(cfg)
     save_to_mega(cfg, ser)
     print(f"\nSaved to {CONFIG_PATH}.")

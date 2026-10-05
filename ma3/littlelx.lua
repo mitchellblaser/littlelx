@@ -159,6 +159,12 @@ local function act(arg)
 		local shorter = t:gsub("%s*%S+%s*$", "")
 		replace_line(#shorter > 0 and (shorter .. " ") or "")
 	end
+	-- report the new command line now rather than on the next tick
+	local now = cmdtext()
+	if now ~= t then
+		last["cmd"] = now
+		send("cmdline", "s", now)
+	end
 end
 
 -- ---- entry point -------------------------------------------------------
