@@ -81,6 +81,7 @@ DEFAULTS = {
         "port": 8000,             # MA3: Menu > In & Out > OSC > Port
         "prefix": "/gma3",        # MA3 OSC line "Prefix" (gma3), "" if none
         "listen_port": 9000,      # MA3 "Send" destination port, for feedback
+        "fader_interval": 0.04,   # s between messages per fader (MA lags if flooded)
         "fader_type": "i",        # how faders are sent; --test-faders picks it (see FADER_FORMATS)
     },
     "ma3": {
@@ -355,6 +356,9 @@ class Port:
                 import fcntl
                 fcntl.ioctl(self.fd, 0x80085402, struct.pack("L", BAUD))
         self.lock = threading.Lock()
+        self.line_lock = threading.Lock()  # a Pi line's pieces must not be split by another line
+        self.outq = queue.Queue()  # touchscreen lines for the writer thread (see post)
+        self.writer = None
         self.pi_proto = 0        # touchscreen protocol, from its HELLO
         self.pi_bad = 0          # lines from the touchscreen with a bad checksum
         self.pacer = Pacer(PI_RATE)
@@ -403,16 +407,41 @@ class Port:
         """Lines starting with '>' go to the touchscreen: checksummed (if its
         firmware understands it) and paced in small pieces. Everything that
         talks to the Pi goes through here, so nothing can skip either."""
-        if line.startswith(">"):
-            body = line[1:]
-            if self.pi_proto >= 3:
-                body = checksummed(body)
-            data = (">" + body + "\n").encode(errors="replace")
-            for off in range(0, len(data), PI_PIECE):
-                self.pacer.wait(PI_PIECE)
-                self._write(data[off:off + PI_PIECE])
-            return
-        self._write((line + "\n").encode(errors="replace"))
+        with self.line_lock:
+            if line.startswith(">"):
+                body = line[1:]
+                if self.pi_proto >= 3:
+                    body = checksummed(body)
+                data = (">" + body + "\n").encode(errors="replace")
+                for off in range(0, len(data), PI_PIECE):
+                    self.pacer.wait(PI_PIECE)
+                    self._write(data[off:off + PI_PIECE])
+                return
+            self._write((line + "\n").encode(errors="replace"))
+
+    def post(self, line):
+        """Like send(), but returns at once: a writer thread does the paced
+        sending, so the bridge never waits on the touchscreen link (faders
+        and keys must not queue up behind screen drawing)."""
+        if self.writer is None:
+            self.writer = start_thread(self._writer)
+        self.outq.put(line)
+
+    @property
+    def backlog(self):
+        """Touchscreen lines still waiting to be sent."""
+        return self.outq.qsize()
+
+    def _writer(self):
+        while not self.closed:
+            try:
+                line = self.outq.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            try:
+                self.send(line)
+            except Exception:
+                pass  # the reader thread reports the disconnect
 
     def _write(self, data):
         with self.lock:
@@ -622,6 +651,7 @@ class Screen:
     def __init__(self, bridge):
         self.b = bridge
         self.name = "main"
+        self.dirty_faders = set()
         self.cmdline = ""      # local command line (used when MA isn't linked)
         self.keymap = {}
         self.w, self.h = 320, 480
@@ -789,6 +819,19 @@ class Screen:
             self.setw(wid, value=self.button_lit(btn))
 
     def update_fader(self, i):
+        """Redraw fader i soon: faders change far faster than the screen link
+        can show, so only the latest state is drawn (see flush_faders)."""
+        self.dirty_faders.add(i)
+
+    def flush_faders(self):
+        ser = self.b.ser
+        if not self.dirty_faders or (ser and ser.backlog > 4):  # link busy: draw newer values later
+            return
+        for i in sorted(self.dirty_faders):
+            self.draw_fader(i)
+        self.dirty_faders.clear()
+
+    def draw_fader(self, i):
         """Bar = MA's real level (when known), marker = the physical fader."""
         if self.name != "main" or (self.FADER0 + i) not in self.state:
             return
@@ -874,14 +917,27 @@ class Encoder:
     def __init__(self, div):
         self.state = 3
         self.acc = 0
+        self.net = 0             # movement since the click-size check last looked
         self.div = max(1, div)
 
+    def rests(self):
+        """States the knob sits in between clicks (A/B pulled up: 3 = both open)."""
+        return {3} if self.div >= 4 else {0, 3} if self.div >= 2 else {0, 1, 2, 3}
+
     def update(self, a, b):
+        """-> clicks to act on. A click only counts once the knob settles into a
+        detent, so wiggling (or contact bounce) that comes back adds up to 0."""
         cur = (a << 1) | b
-        self.acc += self.TABLE[(self.state << 2) | cur]
+        step = self.TABLE[(self.state << 2) | cur]
+        self.acc += step
+        self.net += step
         self.state = cur
-        detents = int(self.acc / self.div)
-        self.acc -= detents * self.div
+        if cur not in self.rests():
+            return 0
+        detents = 0
+        if abs(self.acc) * 2 >= self.div:  # most of a click (tolerates a missed edge)
+            detents = round(self.acc / self.div) or (1 if self.acc > 0 else -1)
+        self.acc = 0
         return detents
 
 
@@ -911,7 +967,7 @@ class Bridge:
                        busy="", busy_at=0.0, res={})
         self.enc_edge_at = [0.0, 0.0]        # encoder click-size auto-detection
         self.enc_checked = [0.0, 0.0]
-        self.enc_rest = [set(), set()]
+        self.enc_rest = [{}, {}]              # settled state -> times seen
         self.ma_values = {}                  # (page, exec) -> 0..100 from plain OSC feedback
         self.ma_seen = 0
         self.ma_installed_at = 0.0
@@ -958,6 +1014,8 @@ class Bridge:
                 self.digital[k["pin"]] = ("key", i)
         self.encs = []
         for i, e in enumerate(hw["encoders"]):
+            if e and e.get("div", 4) < 2:  # set by an earlier, over-eager click detection
+                e["div"] = 2
             self.encs.append(Encoder(e.get("div", 4)) if e else None)
             if e:
                 self.digital[e["a"]] = ("enc", i, "a")
@@ -1046,34 +1104,37 @@ class Bridge:
         self.ma_installed_at = time.time()
         h = src.hex()
         pieces = [h[off:off + 240] for off in range(0, len(h), 240)]
-        for i, piece in enumerate(pieces, 1):
-            self.osc("/cmd", f"Lua \"SetVar(GlobalVars(),'llx_{i}','x{piece}')\"")
-            time.sleep(0.01)
-        self.osc("/cmd", f"Lua \"SetVar(GlobalVars(),'llx_n',{len(pieces)})\"")
-        time.sleep(0.05)
         attrs = ",".join(sorted({e["attribute"] for e in self.cfg["encoders"] if e and e.get("attribute")}
                                 | {e["push"]["resolution"] for e in self.cfg["encoders"]
                                    if e and isinstance(e.get("push"), dict) and "resolution" in e["push"]})) or "Dimmer"
         attrs = re.sub(r"[^A-Za-z0-9,_]", "", attrs)
-        self.osc("/cmd", 'Lua "' + self.MA_RUN.replace("{arg}", f"__start {line} {tick} {attrs}") + '"')
+        start = 'Lua "' + self.MA_RUN.replace("{arg}", f"__start {line} {tick} {attrs}") + '"'
+
+        def send_all():  # spaced out for MA, on its own thread so faders never wait
+            for i, piece in enumerate(pieces, 1):
+                self.osc("/cmd", f"Lua \"SetVar(GlobalVars(),'llx_{i}','x{piece}')\"")
+                time.sleep(0.01)
+            self.osc("/cmd", f"Lua \"SetVar(GlobalVars(),'llx_n',{len(pieces)})\"")
+            time.sleep(0.05)
+            self.osc("/cmd", start)
+        start_thread(send_all)
 
     def to_pi(self, line):
         if not self.ser:
             return
-        try:  # Port.send checksums and paces
-            self.ser.send(">" + line)
-        except Exception:
-            pass  # reader thread reports the disconnect
+        self.ser.post(">" + line)  # checksummed and paced on the port's writer thread
 
     def send_fader(self, i, value):
         fmt = self.cfg["osc"].get("fader_type", "i")
-        if fmt.startswith("cmd"):  # command line: max ~25/s per fader, last value always sent
-            now = time.time()
-            if now - self.fader_cmd_at[i] < 0.04:
-                self.fader_cmd_pending[i] = value
-                return
-            self.fader_cmd_at[i] = now
-            self.fader_cmd_pending[i] = None
+        # At most one message per fader_interval, always the newest position.
+        # MA applies fader messages at a limited rate: send one per percent of a
+        # long move and it queues them up and trails behind the real fader.
+        now = time.time()
+        if now - self.fader_cmd_at[i] < self.fader_interval(fmt):
+            self.fader_cmd_pending[i] = value
+            return
+        self.fader_cmd_at[i] = now
+        self.fader_cmd_pending[i] = None
         self.fader_sent[i] = value
         now = time.time()
         hist = self.sent_hist[i]
@@ -1085,9 +1146,14 @@ class Bridge:
         if self.verbose:
             print(f"fader {i + 1}: {round(value)}%  ->  {addr} {arg}")
 
+    def fader_interval(self, fmt):
+        iv = float(self.cfg["osc"].get("fader_interval", 0.04))
+        return max(iv, 0.05) if fmt.startswith("cmd") else iv  # the command line is slower
+
     def flush_faders(self):
+        fmt = self.cfg["osc"].get("fader_type", "i")
         for i, v in enumerate(self.fader_cmd_pending):
-            if v is not None and time.time() - self.fader_cmd_at[i] >= 0.04:
+            if v is not None and time.time() - self.fader_cmd_at[i] >= self.fader_interval(fmt):
                 self.send_fader(i, v)
 
     def do_action(self, act, down):
@@ -1366,19 +1432,24 @@ class Bridge:
             scr.update_header()
 
     def check_encoder_clicks(self, now):
-        """Learn how many signal changes one click is: a full-cycle encoder always
-        rests on the same state, a half-cycle one alternates between two."""
+        """Learn whether one click is 4 or 2 signal changes: a 4-change encoder
+        always settles on the same state, a 2-change one alternates between two.
+        Only settled positions after a real turn count (not wiggles, not a knob
+        held between clicks), and it takes repeated evidence to change."""
         for i, e in enumerate(self.cfg["hw"]["encoders"]):
             enc = self.encs[i] if i < len(self.encs) else None
-            if not e or not enc or self.enc_edge_at[i] <= self.enc_checked[i] or now - self.enc_edge_at[i] < 0.25:
+            if not e or not enc or self.enc_edge_at[i] <= self.enc_checked[i] or now - self.enc_edge_at[i] < 0.8:
                 continue
             self.enc_checked[i] = now
-            self.enc_rest[i].add(enc.state)
-            div = {1: 4, 2: 2}.get(len(self.enc_rest[i]), 1)
-            if div < e.get("div", 4):
-                e["div"] = enc.div = div
+            turned, enc.net = abs(enc.net) >= 2, 0
+            if not turned or e.get("div", 4) <= 2:
+                continue
+            seen = self.enc_rest[i]
+            seen[enc.state] = seen.get(enc.state, 0) + 1
+            if seen.get(0, 0) >= 2 and seen.get(3, 0) >= 2:
+                e["div"] = enc.div = 2
                 enc.acc = 0
-                print(f"Encoder {i + 1}: {div} signal changes per click detected, adjusted.")
+                print(f"Encoder {i + 1}: 2 signal changes per click detected, adjusted.")
                 save_config(self.cfg)
                 if self.ser:
                     save_to_mega(self.cfg, self.ser)
@@ -1407,7 +1478,7 @@ class Bridge:
             self.to_pi("?")
             while True:
                 try:
-                    kind, src, data = events.get(timeout=0.05)
+                    kind, src, data = events.get(timeout=0.01)  # short: held fader values go out on time
                 except queue.Empty:
                     kind = None
                 if kind == "mega" and src is self.ser:
@@ -1436,7 +1507,9 @@ class Bridge:
                 if self.pi_ready and now - last_status > 1:
                     last_status = now
                     self.screen.update_header()
-                if self.pi_ready and now - last_refresh > 0.1:
+                if self.pi_ready:
+                    self.screen.flush_faders()
+                if self.pi_ready and now - last_refresh > 0.1 and self.ser and self.ser.backlog < 4:
                     last_refresh = now
                     self.screen.refresh_step()
 

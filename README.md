@@ -247,8 +247,15 @@ MA's command line; `"Please"`, `"Clear"` and `"<-"` act on the line), `{"cmd": "
 take `{"attribute": "Pan", "step": 1}` (follows MA's Coarse/Fine), `{"page": 1}` or
 a `{"cmd": ...}` using `{d}` for the step.
 
-Encoders are counted on the computer: if one needs two clicks per step, the
-bridge notices after a couple of clicks, fixes it and saves it on the controller.
+Encoders are counted on the computer, and a click only counts once the knob
+settles into its detent (wiggling does nothing). If an encoder needs two clicks
+per step, the bridge notices within a few clicks, fixes it and saves it on the
+controller.
+
+Faders send at most `"fader_interval"` apart (0.04 s = 25 updates a second per
+fader, in the `osc` section): slow moves still go out every 1 %, fast moves in
+bigger steps, always ending on the exact final position. MA falls behind when
+flooded with one message per percent.
 
 **Faders not moving in MA3?** MA3 versions differ in the fader message they
 accept. Run `littlelx.py --test-faders`: it moves executor 201 using each known
