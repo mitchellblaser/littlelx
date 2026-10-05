@@ -252,7 +252,7 @@ settles into its detent (wiggling does nothing). If an encoder needs two clicks
 per step, the bridge notices within a few clicks, fixes it and saves it on the
 controller.
 
-Faders send at most `"fader_interval"` apart (0.04 s = 25 updates a second per
+Faders send at most `"fader_interval"` apart (0.025 s = 40 updates a second per
 fader, in the `osc` section): slow moves still go out every 1 %, fast moves in
 bigger steps, always ending on the exact final position. MA falls behind when
 flooded with one message per percent.

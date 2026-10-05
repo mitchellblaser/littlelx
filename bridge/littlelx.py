@@ -72,7 +72,7 @@ def bridge_version():
 #   {"cmd": "... {d} ..."}               {d} = step per click, or {"page": 1}
 # Push actions also allow {"resolution": "Dimmer"}: toggle MA's Coarse/Fine.
 
-CONFIG_VERSION = 3
+CONFIG_VERSION = 4
 
 DEFAULTS = {
     "config_version": CONFIG_VERSION,
@@ -81,7 +81,7 @@ DEFAULTS = {
         "port": 8000,             # MA3: Menu > In & Out > OSC > Port
         "prefix": "/gma3",        # MA3 OSC line "Prefix" (gma3), "" if none
         "listen_port": 9000,      # MA3 "Send" destination port, for feedback
-        "fader_interval": 0.04,   # s between messages per fader (MA lags if flooded)
+        "fader_interval": 0.025,  # s between messages per fader (MA lags if flooded)
         "fader_type": "i",        # how faders are sent; --test-faders picks it (see FADER_FORMATS)
     },
     "ma3": {
@@ -163,6 +163,8 @@ def migrate(cfg):
     if cfg.get("config_version", 1) < 2:
         cfg.pop("sync_page_to_ma", None)
         cfg["pickup"] = True  # old default was off; soft takeover is now on
+    if cfg.get("osc", {}).get("fader_interval") == 0.04:  # v4: faster default
+        cfg["osc"]["fader_interval"] = 0.025
     for e in cfg.get("encoders", []):  # v3: attribute encoders follow MA's resolution
         m = re.match(r'Attribute "([^"]+)" At \+ \{d\}$', (e or {}).get("cmd", ""))
         if m:
@@ -1147,7 +1149,7 @@ class Bridge:
             print(f"fader {i + 1}: {round(value)}%  ->  {addr} {arg}")
 
     def fader_interval(self, fmt):
-        iv = float(self.cfg["osc"].get("fader_interval", 0.04))
+        iv = float(self.cfg["osc"].get("fader_interval", 0.025))
         return max(iv, 0.05) if fmt.startswith("cmd") else iv  # the command line is slower
 
     def flush_faders(self):
