@@ -704,6 +704,7 @@ def res_label(f):
 
 
 C_PROG = "ff4b3e"  # programmer values: red, like MA
+C_VALUE = "a4acb8"  # values not in the programmer: grey, like MA
 FEATURE_COLORS = {  # encoder headers, by MA feature group
     "dimmer": "d8b020", "position": "3a7bd5", "gobo": "3aa655", "color": "b03ab8",
     "beam": "d07a2a", "focus": "2aa8a8", "control": "7a8590", "shapers": "b84848", "video": "5a5ac8",
@@ -745,6 +746,7 @@ class Screen:
         self.exec_entry = ""
         self.reset_armed = 0.0
         self.value_entry = ""
+        self.sets_page = 0
         self.cmdline = ""      # local command line (used when MA isn't linked)
         self.keymap = {}
         self.w, self.h = 320, 480
@@ -996,8 +998,8 @@ class Screen:
                     self.setw(base + 2, value=0, text="", colors=(C_PANEL, C_DIM, C_PANEL))
                     continue
                 self.setw(base + 4, text=f" {i + 1}: {e['pretty']}", colors=(shade(gcolor, 0.4), C_TEXT, C_PANEL))
-                self.setw(base + 1, text=e["value"] or "-",
-                          colors=(C_PANEL, C_PROG if e["prog"] else C_TEXT, C_PANEL))
+                self.setw(base + 1, text=e["value"] or "-",  # like MA: red in the programmer, else grey
+                          colors=(C_PANEL, C_PROG if e["prog"] else C_VALUE, C_PANEL))
                 res = res_label(e["res"])
                 self.keymap[base + 2] = {"resolution": e["attr"]}
                 self.setw(base + 2, value=1 if res != "Coarse" else 0, text=res, colors=(C_BTN, C_TEXT, C_BTN_ON))
@@ -1021,22 +1023,82 @@ class Screen:
         now = f"   (now {a[2]})" if a[2] else ""
         return f"{a[1]}{now}\n{self.value_entry or ''}_"
 
-    def draw_value_entry(self, i):
+    def show_sets(self, i):
+        """Fill the named-value buttons from the current scroll row."""
+        a = self.b.encoder_attr(i)
+        sets = self.b.ma["sets"].get(a[0].lower(), []) if a else []
+        last_row = max(0, -(-len(sets) // 3) - 3)
+        self.sets_page = max(0, min(self.sets_page, last_row))  # first row shown
+        first = self.sets_page * 3
+        for n in range(9):
+            wid = self.SET0 + 20 + n
+            if wid not in self.state:
+                continue
+            k = first + n
+            if k < len(sets):
+                self.keymap[wid] = {"setv": k + 1, "enc": i}
+                self.setw(wid, text=sets[k][:14], colors=(C_KEY2, C_TEXT, C_BTN_ON))
+            else:
+                self.keymap.pop(wid, None)
+                self.setw(wid, text="", colors=(C_BG, C_DIM, C_BG))
+        if self.SET0 + 30 in self.state:
+            self.setw(self.SET0 + 30, text=f"turn the encoder for more   {first + 1}-{min(first + 9, len(sets))}"
+                                           f" of {len(sets)}")
+
+    def scroll_sets(self, d):
+        """Encoder turned while typing a value: scroll the named values a row."""
+        if not self.name.startswith("entry") or self.SET0 + 20 not in self.state:
+            return False
+        self.sets_page += d
+        self.show_sets(int(self.name[5:]))
+        return True
+
+    def draw_value_entry(self, i, keep=False):
+        """Number pad for the encoder's attribute, and above it the selected
+        fixture's named values (gobos, colour slots...) when it has any.
+        keep: redraw (named values arrived, next page of them), keep the typing."""
         w = self.w
         top = self.header_h() + 4
+        b = self.b
+        a = b.encoder_attr(i)
+        if keep:
+            self.state = {}
+            self.refresh_ids = []
+            self.send("CLR")
+            self.send(f"BG {C_BG}")
+            self.header()
+        else:
+            self.value_entry = ""
+            self.sets_page = 0
+            if a and b.ma_linked():
+                b.ma["sets"].pop(a[0].lower(), None)
+                b.ma_plugin(f"sets {a[0]}")  # the answer redraws this page
         self.keymap = {}
-        self.value_entry = ""
-        self.widget(self.SET_TITLE, "L", 4, top, w - 8, 64, "000000", C_CMD, "000000", 1, 0, 0, self.value_title(i))
-        gy = top + 70
-        bw, bh = (w - 4) // 3, (self.h - 4 - gy) // 5
+        self.widget(self.SET_TITLE, "L", 4, top, w - 8, 56, "000000", C_CMD, "000000", 1, 0, 0, self.value_title(i))
+        y = top + 60
+        sets = b.ma["sets"].get(a[0].lower(), []) if a else []
+        if sets:
+            rows = min(3, -(-len(sets) // 3))
+            sw, sh = (w - 4) // 3, 40
+            for n in range(rows * 3):
+                r, c = divmod(n, 3)
+                self.widget(self.SET0 + 20 + n, "B", 4 + c * sw, y + r * sh, sw - 3, sh - 4, C_KEY2, C_TEXT,
+                            C_BTN_ON, 0, 0, 0, "")
+            y += rows * sh
+            if len(sets) > 9:  # more than fit: the encoder (or this button) scrolls
+                self.keymap[self.SET0 + 30] = {"setpage": 1, "enc": i}
+                self.widget(self.SET0 + 30, "B", 4, y, w - 8, 30, C_PANEL, C_DIM, C_BTN_ON, 0, 0, 0, "")
+                y += 34
+            self.show_sets(i)
+        bw, bh = (w - 4) // 3, (self.h - 4 - y) // 5
         keys = ["7", "8", "9", "4", "5", "6", "1", "2", "3", ".", "0", "<-"]
         for n, k in enumerate(keys):
             r, c = divmod(n, 3)
             wid = self.SET0 + n
             self.keymap[wid] = {"vkey": k, "enc": i}
-            self.widget(wid, "B", 4 + c * bw, gy + r * bh, bw - 3, bh - 4, C_BTN if k.isdigit() else C_KEY2,
+            self.widget(wid, "B", 4 + c * bw, y + r * bh, bw - 3, bh - 4, C_BTN if k.isdigit() else C_KEY2,
                         C_TEXT, C_BTN_ON, 1, 0, 0, k)
-        y = gy + 4 * bh
+        y += 4 * bh
         self.keymap[self.SET0 + 12] = {"vkey": "-", "enc": i}
         self.widget(self.SET0 + 12, "B", 4, y, bw - 3, bh - 4, C_KEY2, C_TEXT, C_BTN_ON, 1, 0, 0, "+/-")
         self.keymap[self.BACK] = {"back": True}
@@ -1260,6 +1322,18 @@ class Screen:
             if self.b.encoder_attr(act["entry"]):
                 self.set_screen(f"entry{act['entry']}")
             return
+        if "setv" in act:
+            a = self.b.encoder_attr(act["enc"])
+            if a:
+                self.b.ma_plugin(f"setv {a[0]} {act['setv']}")
+            self.set_screen("encoders")
+            return
+        if "setpage" in act:  # tap: next three rows, then back to the top
+            a = self.b.encoder_attr(act["enc"])
+            n = len(self.b.ma["sets"].get(a[0].lower(), [])) if a else 0
+            self.sets_page = self.sets_page + 3 if (self.sets_page + 3) * 3 < n else 0
+            self.show_sets(act["enc"])
+            return
         if "vkey" in act:
             k, i = act["vkey"], act["enc"]
             a = self.b.encoder_attr(i)
@@ -1308,7 +1382,7 @@ class Screen:
     def on_release(self, wid):
         act = self.keymap.get(wid)
         if act and not any(k in act for k in ("keypad", "back", "encpage", "edit", "assign",
-                                              "digit", "reset_keys", "entry", "vkey")):
+                                              "digit", "reset_keys", "entry", "vkey", "setv", "setpage")):
             self.b.do_action(act, False)
 
     def local_key(self, k):
@@ -1391,7 +1465,8 @@ class Bridge:
         self.verbose = False
         self.ma = dict(alive=0.0, page=None, fader={}, run={}, name={}, master={}, cmdline="",
                        busy="", busy_at=0.0, res={}, color={},
-                       feat=("", "", False), encn=0, encs={}, ver=None, linked_at=0.0)  # MA's encoders (see report_encoders)
+                       feat=("", "", False), encn=0, encs={}, ver=None, linked_at=0.0,
+                       sets={})  # attribute -> named values of the selected fixture  # MA's encoders (see report_encoders)
         self.keys_down = set()               # hardware keys whose press was acted on
         self.enc_page = 0                    # which pair of MA's encoders the hardware ones follow
         self.enc_edge_at = [0.0, 0.0]        # encoder click-size auto-detection
@@ -1779,7 +1854,9 @@ class Bridge:
             d = self.encs[i].update(self.pins.get(e["a"], 1), self.pins.get(e["b"], 1))
             if d and e.get("reverse"):
                 d = -d
-            if d and self.following(i):
+            if d and self.pi_ready and self.screen.scroll_sets(d):
+                pass  # scrolled the named values on the screen
+            elif d and self.following(i):
                 e = self.ma_encoder(i)
                 if e:
                     self.on_encoder({"attribute": e["attr"], "step": act.get("step", 1), "res": e["res"]}, d)
@@ -1965,6 +2042,13 @@ class Bridge:
             ma["encs"][int(what[4:])] = dict(attr=p[0], pretty=p[1] or p[0], value=p[2], prog=p[3] == "p", res=res)
             if scr:
                 scr.update_encoders()
+        elif what == "sets":
+            p = str(val or "").split("|")
+            ma["sets"][p[0].lower()] = [n for n in p[1:] if n]
+            if scr and scr.name.startswith("entry"):
+                a = self.encoder_attr(int(scr.name[5:]))
+                if a and a[0].lower() == p[0].lower():
+                    scr.draw_value_entry(int(scr.name[5:]), keep=True)
         elif what == "ver":
             ma["ver"] = str(val or "")
         elif what == "probe":

@@ -16,6 +16,8 @@
 --   "page 3"       select executor page 3
 --   "res Dimmer"   toggle MA's encoder resolution for an attribute (Coarse/Fine)
 --   "probe"        print what this MA version's Lua offers (encoder diagnostics)
+--   "sets Gobo1"   report the selected fixture's named values for an attribute
+--   "setv Gobo1 3" apply the 3rd of them to the selection
 --   "__start <osc line> <tick> [Attr,Attr] [version]"   start reporting from a
 --                  Timer (bridge install); also report those attributes'
 --                  resolution, and the version so the bridge can update us
@@ -215,14 +217,98 @@ local function attr_value(sf, aname)
 		local v = fmt_value(prop(p[1], "absolute", "abs", "value"))
 		if v then return v, "p" end
 	end
+	-- not in the programmer: the value the fixture has now (MA shows it grey).
+	-- Where MA keeps it differs by version: try the known places.
 	local ch = try(GetUIChannel, ui)
-	local rt = type(ch) == "table" and num(ch.rt_index or ch.rt_channel) or nil
-	local r = rt and try(GetRTChannel, rt)
-	if type(r) == "table" then
-		local v = fmt_value(r.final_value or r.value or r.absolute)
-		if v then return v, "" end
+	if type(ch) == "table" then
+		local rt = num(ch.rt_index or ch.rt_channel or ch.rtchannel)
+		local r = rt and try(GetRTChannel, rt)
+		for _, t in ipairs({ type(r) == "table" and r or {}, ch }) do
+			for _, k in ipairs({ "final_value", "finalvalue", "value", "absolute", "current", "output",
+				"normed_value", "normed" }) do
+				local v = fmt_value(t[k])
+				if v then return v, "" end
+			end
+		end
 	end
 	return "", ""
+end
+
+-- ---- named values of an attribute (gobos, colour slots...) -------------
+-- Read from the selected fixture's own fixture type, so they are right for
+-- whatever is selected: its channel function for the attribute, whose
+-- children are the channel sets.
+local function kids(h)
+	local ok, c = pcall(function() return h:Children() end)
+	return ok and type(c) == "table" and c or {}
+end
+
+local function same(a, b) return a and b and tostring(a):lower() == tostring(b):lower() end
+
+local function channel_function(sf, aname)
+	local ai = try(GetAttributeIndex, aname)
+	local ui = ai and try(GetUIChannelIndex, sf, ai)
+	if ui == nil then return nil end
+	local cf = try(GetChannelFunction, ui, ai)
+	if cf ~= nil and type(cf) ~= "number" and type(cf) ~= "string" then return cf end
+	local ch = try(GetUIChannel, ui) -- else: the logical channel's function for this attribute
+	local lc = type(ch) == "table" and (ch.logical_channel or ch.LogicalChannel) or nil
+	for _, f in ipairs(lc and type(lc) ~= "number" and kids(lc) or {}) do
+		if same(oname(prop(f, "Attribute", "attribute")), aname) then return f end
+	end
+	return nil
+end
+
+local function channel_sets(sf, aname)
+	local out = {}
+	local cf = sf ~= nil and channel_function(sf, aname)
+	for _, set in ipairs(cf and kids(cf) or {}) do
+		local nm = oname(set)
+		local pf, pt = num(prop(set, "PhysicalFrom")), num(prop(set, "PhysicalTo"))
+		if nm and nm ~= "" and pf then
+			out[#out + 1] = { name = nm, value = pt and (pf + pt) / 2 or pf, from = math.min(pf, pt or pf),
+				to = math.max(pf, pt or pf) }
+		end
+	end
+	return out
+end
+
+-- A value inside one of the fixture's named ranges reads as its name
+-- ("Gobo 2", "Open"), like MA's encoder bar.
+local sets_cache = {}
+local function value_words(sf, aname, v)
+	local x = type(v) == "string" and tonumber(v) or nil
+	if not x then return v end
+	local key = tostring(sf) .. "/" .. aname
+	local sets = sets_cache[key]
+	if not sets then
+		sets = channel_sets(sf, aname)
+		sets_cache[key] = sets
+	end
+	for _, set in ipairs(sets) do
+		if x >= set.from - 1e-6 and x <= set.to + 1e-6 then return set.name end
+	end
+	return v
+end
+
+local function report_sets(aname)
+	local names = {}
+	for n, set in ipairs(channel_sets(try(SelectionFirst), aname)) do
+		if n > 48 then break end
+		names[#names + 1] = (set.name:gsub("|", "/"))
+	end
+	send("sets", "s", aname .. "|" .. table.concat(names, "|"))
+end
+
+local function apply_set(aname, n)
+	local set = channel_sets(try(SelectionFirst), aname)[num(n) or 0]
+	if not set then
+		send("busy", "s", "that value isn't on the selected fixture")
+		return
+	end
+	local v = string.format("%.4f", set.value):gsub("0+$", ""):gsub("%.$", "")
+	Cmd(string.format('Attribute "%s" At %s', aname, v))
+	Printf(string.format("littlelx: %s %s -> At %s", aname, set.name, v))
 end
 
 local function report_encoders()
@@ -235,12 +321,16 @@ local function report_encoders()
 			if #list >= MAXENC then break end
 			local v, st = attr_value(sf, a.name)
 			if v ~= nil then -- nil: the selected fixture doesn't have this attribute
+				v = tostring(value_words(sf, a.name, v)):gsub("|", "/")
 				list[#list + 1] = table.concat({ a.name, a.pretty, v, st, tostring(resolution(a.name)) }, "|")
 			end
 		end
 	end
 	local head = fname .. "|" .. (feat and feature_group(feat) or "") .. "|" .. (sf ~= nil and "1" or "0")
-	if changed("feat", head) then send("feat", "s", head) end
+	if changed("feat", head) then
+		send("feat", "s", head)
+		sets_cache = {} -- other feature / selection: read the named values again
+	end
 	if changed("encn", #list) then send("encn", "i", #list) end
 	for k, e in ipairs(list) do
 		if changed("enc" .. k, e) then send("enc/" .. k, "s", e) end
@@ -298,10 +388,6 @@ local function probe()
 	local sf = try(SelectionFirst)
 	say("selection first:", sf)
 	-- named values (gobos etc.) of the selected feature's attributes
-	local function kids(h)
-		local ok, c = pcall(function() return h:Children() end)
-		return ok and type(c) == "table" and c or {}
-	end
 	local function cls(h)
 		local ok, c = pcall(function() return h:GetClass() end)
 		return ok and c or type(h)
@@ -325,6 +411,11 @@ local function probe()
 			local ai = try(GetAttributeIndex, a.name)
 			local ui = ai and try(GetUIChannelIndex, sf, ai)
 			say("sets for", a.name, "attr", ai, "ui", ui)
+			local cf = channel_function(sf, a.name)
+			say("  channel function found:", cf ~= nil and (cls(cf) .. " " .. tostring(oname(cf))) or "no")
+			local found = {}
+			for _, set in ipairs(channel_sets(sf, a.name)) do found[#found + 1] = set.name .. "=" .. set.value end
+			say("  named values:", #found > 0 and table.concat(found, ", ") or "none")
 			if ui then
 				local ch = try(GetUIChannel, ui)
 				dump("  GetUIChannel", ch)
@@ -352,8 +443,8 @@ local function probe()
 			if type(p) == "table" then dump("GetProgPhaser[1]", p[1]) end
 			local ch = try(GetUIChannel, ui)
 			dump("GetUIChannel", ch)
-			local rt = type(ch) == "table" and num(ch.rt_index or ch.rt_channel)
-			if rt then dump("GetRTChannel", try(GetRTChannel, rt)) end
+			local rt = type(ch) == "table" and num(ch.rt_index or ch.rt_channel or ch.rtchannel)
+			if rt then dump("GetRTChannel", try(GetRTChannel, rt)) else say("no rt channel index in GetUIChannel") end
 		end
 	end
 	for _, l in ipairs(out) do Printf("littlelx probe: " .. l) end
@@ -434,6 +525,15 @@ local function act(arg)
 	end
 	if verb == "probe" then
 		probe()
+		return
+	end
+	if verb == "sets" then -- "sets Gobo1": report its named values
+		report_sets(rest)
+		return
+	end
+	if verb == "setv" then -- "setv Gobo1 3": apply the 3rd of them
+		local a, n = rest:match("^(%S+)%s+(%S+)")
+		if a then apply_set(a, n) end
 		return
 	end
 	if verb == "res" then
