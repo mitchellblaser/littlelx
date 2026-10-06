@@ -16,6 +16,7 @@
 --   "page 3"       select executor page 3
 --   "res Dimmer"   toggle MA's encoder resolution for an attribute (Coarse/Fine)
 --   "probe"        print what this MA version's Lua offers (encoder diagnostics)
+--   "resync"       report everything again (the bridge restarted)
 --   "tab Gobo2Pos" encoders show that feature of the group (MA's tabs)
 --   "sets Gobo1"   report the selected fixture's named values for an attribute
 --   "setv Gobo1 3" apply the 3rd of them to the selection
@@ -714,6 +715,10 @@ local function act(arg)
 	end
 	if verb == "probe" then
 		probe()
+		return
+	end
+	if verb == "resync" then -- a (re)started bridge: send everything, not just changes
+		report(true)
 		return
 	end
 	if verb == "tab" then -- "tab Gobo2Pos": the encoders show that feature

@@ -2110,6 +2110,9 @@ class Bridge:
         if not was_linked:
             print("MA3 linked: page, faders, key states and command line follow MA.")
             ma["ver"], ma["linked_at"] = None, time.time()
+            # its code may have been running all along and only reports changes:
+            # ask for everything (names, colours...) once
+            self.ma_plugin("resync")
         scr = self.screen if self.pi_ready else None
         if what == "page" and isinstance(val, int):
             self.set_page(val, from_ma=True)
