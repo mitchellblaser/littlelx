@@ -252,6 +252,13 @@ on the controller.
   "connection": {
     "type": "ma3",              // or "generic": plain OSC to anything else
     "host": "192.168.1.20", "port": 8000, "prefix": "/gma3", "listen_port": 9000,
+    "fader_interval": 0.025,    // s between fader messages; "fader_jump": 5 (% sent at once)
+    "values": {                 // generic: what is sent (fader feedback is read the same way)
+      "fader": [0, 1],          //   bottom, top (e.g. [0, 127])
+      "key": [1, 0], "button": [1, 0], "push": [1, 0],   // pressed, released
+      "encoder": 1,             //   per click
+      "integer": false          //   whole numbers
+    },
     "generic": {                // generic: where things are sent ({n} = number)
       "fader": "/fader/{n}",    //   level 0..1
       "key": "/key/{n}",        //   1 pressed, 0 released
@@ -259,18 +266,30 @@ on the controller.
       "push": "/encoder/{n}/push",
       "button": "/button/{n}",  //   touchscreen buttons
       "page": "/page",          //   page number (Page -/+)
-      "command": "/command"     //   the keypad's command line, on Please
+      "command": "/command",    //   the keypad's command line, on Please
+      "set": "/encoder/{n}/set" //   a value set on an encoder's value page
     }
   },
   "faders": [{"exec": 201, "name": "Front", "color": "e0a020"},
-             {"osc": "/my/level", "feedback": "/my/level/state"}, ...],    // 5
+             {"osc": "/my/level", "range": [0, 255], "feedback": "/my/level/state"}, ...],
   "keys": [{"page": -1}, {"exec": 301}, {"osc": "/go"}, ...],              // 20
-  "encoders": [{"follow": true, "attribute": "Dimmer", "step": 1},         // ma3
-               {"label": "Speed", "value": "/speed/display"}],              // generic
+  "encoders": [{"follow": true, "attribute": "Dimmer", "step": 1,         // ma3
+                "click": "pad", "pad": true, "choices": "ma"},
+               {"label": "Gobo", "value": "/gobo/display", "set": "/gobo/set",  // generic
+                "click": "pad", "pad": false,
+                "choices": [{"label": "Open", "value": 0}, {"label": "Star", "value": 1}]}],
   "touch_buttons": [{"label": "Go", "osc": "/go", "lit": "/go/running",
                      "color": "1f7a3a", "lit_color": "c03030", "text_color": "ffffff"},
                     {"label": "Keypad", "screen": "keypad"}, ...],
   "keypad": [["Fixture", "7", "8", "9", "Thru"], ...],                     // 5 rows of 5
+  "screens": {                  // your own screens; open one with {"screen": "name"}
+    "effects": {"title": "Effects", "columns": 2, "back": "main",
+                "buttons": [{"label": "Strobe", "osc": "/fx/strobe", "lit": "/fx/strobe/on"}, ...]},
+    "keypad": {"type": "keypad", "keys": [   // replaces the built-in keypad
+      ["1", "2", "3", {"label": "Enter", "cmdline": "please"}],
+      ["4", "5", "6", {"label": "Del", "cmdline": "backspace"}],
+      [{"label": "Back", "screen": "main"}, "0", ".", {"label": "Go", "osc": "/go"}]]}
+  },
   "screen": {                   // what the touchscreen shows (all optional)
     "left": "Page {page}",      //   top bar left: text, {page} / {profile}
     "middle": "cmdline",        //   "cmdline" (MA), "sent" (last OSC sent),
@@ -280,6 +299,7 @@ on the controller.
     "encoders": "ma",           //   "ma" (follow MA's encoders) or "simple"
     "encoders_title": "Encoders",
     "encoder_strip": true,      //   the small encoder line on main / keypad
+    "columns": null,            //   main page button grid (null: fits the number of buttons)
     "colors": {"background": "101418", "panel": "1c2430", "text": "ffffff",
                "dim": "8899aa", "button": "2c3546", "button_lit": "c08a1e",
                "key": "3a4458", "bar": "2f7de1", "bar_background": "232b38",
@@ -304,11 +324,20 @@ encoders), and a generic profile without `"feedback"` listens on the addresses
 above. With grandMA3 the plugin reports MA's state; a `"feedback"` section there
 adds to it.
 
-Actions (keys, touchscreen buttons, encoder pushes): `{"exec": 201}` (executor
-button), `{"key": "Store"}` (command-line key), `{"cmd": "Go+"}` (command right
-away; generic: to the command address), `{"page": 1}`, `{"screen": "keypad"}`,
-`{"resolution": "Dimmer"}`, and `{"osc": "/any/address"}` (sends 1 on press, 0
-on release - with any connection). A fader with `"osc"` sends its level 0..1
+Actions (keys, touchscreen buttons, keypad keys, encoder pushes): `{"exec": 201}`
+(executor button), `{"key": "Store"}` (command-line key), `{"cmd": "Go+"}`
+(command right away; generic: to the command address), `{"page": 1}`,
+`{"screen": "keypad"}` (any screen, also your own), `{"resolution": "Dimmer"}`,
+`{"cmdline": "please" | "clear" | "backspace"}` (keypad special keys), and
+`{"osc": "/any/address"}` (sends 1 on press, 0 on release, or the item's own
+`"on"` / `"off"` - with any connection). Keypad keys that are plain text are
+typed into the command line.
+
+Encoder clicks: `"click"` is `"pad"` (a value page: number pad if `"pad"`, and
+`"choices"`: `"ma"` = MA's named values of the attribute, or your own list),
+`"push"` (its push action / push address) or `"none"`. Generic profiles send
+the value to the encoder's `"set"` address. The main page's buttons arrange
+themselves in a grid that suits how many there are (up to 18). A fader with `"osc"` sends its level 0..1
 there. In a `generic` profile, keys and buttons without their own `"osc"` send
 to the `generic` addresses (Page and screen buttons still work locally).
 Colours: fader colours come from feedback, then MA's sequence colour, then the

@@ -14,8 +14,31 @@
       "push": "/encoder/{n}/push",
       "button": "/button/{n}",
       "page": "/page",
-      "command": "/command"
-    }
+      "command": "/command",
+      "set": "/encoder/{n}/set"
+    },
+    "values": {
+      "fader": [
+        0,
+        1
+      ],
+      "key": [
+        1,
+        0
+      ],
+      "button": [
+        1,
+        0
+      ],
+      "push": [
+        1,
+        0
+      ],
+      "encoder": 1,
+      "integer": false
+    },
+    "fader_interval": 0.025,
+    "fader_jump": 5
   },
   "faders": [
     {
@@ -101,11 +124,30 @@
   ],
   "encoders": [
     {
-      "label": "Speed"
+      "label": "Gobo",
+      "click": "pad",
+      "pad": false,
+      "set": "/gobo/set",
+      "choices": [
+        {
+          "label": "Open",
+          "value": 0
+        },
+        {
+          "label": "Star",
+          "value": 1
+        },
+        {
+          "label": "Dots",
+          "value": 2
+        }
+      ]
     },
     {
-      "label": "Size",
-      "value": "/size/display"
+      "label": "Speed",
+      "value": "/speed/display",
+      "click": "pad",
+      "pad": true
     }
   ],
   "touch_buttons": [
@@ -123,6 +165,10 @@
     {
       "label": "Back",
       "osc": "/back"
+    },
+    {
+      "label": "Effects",
+      "screen": "effects"
     },
     {
       "label": "Keypad",
@@ -162,7 +208,8 @@
       "bar": "2f7de1",
       "bar_background": "232b38",
       "text": "ffffff"
-    }
+    },
+    "columns": null
   },
   "feedback": {
     "fader": "/fader/{n}",
@@ -175,5 +222,80 @@
     "text": "/text",
     "status": "/status",
     "page": "/page"
+  },
+  "screens": {
+    "effects": {
+      "title": "Effects",
+      "columns": 2,
+      "back": "main",
+      "buttons": [
+        {
+          "label": "Strobe",
+          "osc": "/fx/strobe",
+          "lit": "/fx/strobe/on"
+        },
+        {
+          "label": "Chase",
+          "osc": "/fx/chase",
+          "color": "703090"
+        },
+        {
+          "label": "Rainbow",
+          "osc": "/fx/rainbow",
+          "on": 127,
+          "off": 0
+        },
+        {
+          "label": "Blackout",
+          "osc": "/fx/blackout",
+          "lit": "/fx/blackout/on",
+          "lit_color": "c03030"
+        }
+      ]
+    },
+    "keypad": {
+      "type": "keypad",
+      "keys": [
+        [
+          "1",
+          "2",
+          "3",
+          {
+            "label": "Enter",
+            "cmdline": "please"
+          }
+        ],
+        [
+          "4",
+          "5",
+          "6",
+          {
+            "label": "Del",
+            "cmdline": "backspace"
+          }
+        ],
+        [
+          "7",
+          "8",
+          "9",
+          {
+            "label": "Clear",
+            "cmdline": "clear"
+          }
+        ],
+        [
+          {
+            "label": "Back",
+            "screen": "main"
+          },
+          "0",
+          ".",
+          {
+            "label": "Go",
+            "osc": "/go"
+          }
+        ]
+      ]
+    }
   }
 }

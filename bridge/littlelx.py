@@ -236,7 +236,7 @@ PROFILE_DIR = os.path.join(os.path.expanduser("~"), "littlelx-profiles")
 CONN_KEYS = ("type", "host", "port", "prefix", "listen_port", "fader_type", "generic", "values",
              "fader_interval", "fader_jump")
 PROFILE_FIELDS = ("faders", "keys", "encoders", "touch_buttons", "keypad", "encoder_attributes", "pickup",
-                  "screen", "feedback")
+                  "screen", "feedback", "screens")
 
 # What the touchscreen shows, per connection type; a profile's "screen" overrides
 # any of it. Texts may use {page} and {profile}.
@@ -246,11 +246,12 @@ PROFILE_FIELDS = ("faders", "keys", "encoders", "touch_buttons", "keypad", "enco
 #     anything comes back), "feedback", or any text.
 #   encoders: "ma" (follow MA's encoder bar) or "simple" (label + value each)
 #   encoder_strip: the small encoder line on the main and keypad pages
+#   columns: the main page's button grid (default: what suits the number of buttons)
 SCREEN_DEFAULTS = {
     "ma3": {"left": "Page {page}", "middle": "cmdline", "status": "ma", "encoders": "ma",
-            "encoder_strip": True, "encoders_title": "Encoders"},
+            "encoder_strip": True, "encoders_title": "Encoders", "columns": None},
     "generic": {"left": "{profile}", "middle": "sent", "status": "osc", "encoders": "simple",
-                "encoder_strip": True, "encoders_title": "Encoders"},
+                "encoder_strip": True, "encoders_title": "Encoders", "columns": None},
 }
 # Generic profiles: OSC coming back (to listen_port) that drives the screen.
 # A profile's "feedback" replaces this; items can also have their own:
@@ -1123,7 +1124,13 @@ class Screen:
         self.send("CLR")
         self.send(f"BG {C_BG}")
         self.header()
-        if self.name == "keypad":
+        spec = self.custom_screen(self.name)
+        if spec is not None:  # a profile's own screen
+            if spec.get("type") == "keypad":
+                self.draw_keypad(spec)
+            else:
+                self.draw_custom(spec)
+        elif self.name == "keypad":
             self.draw_keypad()
         elif self.name == "encoders":
             self.draw_encoders()
@@ -1147,39 +1154,89 @@ class Screen:
             self.widget(self.FADER0 + i, "v", 4 + i * fw, top, fw - 3, fh, C_BAR_BG, C_TEXT, C_BAR,
                         0, 0, 0, "")
             self.update_fader(i)
-        cols = 3 if self.portrait else 5
-        btns = self.b.cfg["touch_buttons"][:cols * 4]
-        rows = max(1, -(-len(btns) // cols))
+        btns = [b for b in self.b.cfg["touch_buttons"] if isinstance(b, dict)][:18]
+        cols = self.grid_columns(len(btns), self.portrait, self.b.screen_opt("columns"))
         by = top + fh + 6
-        bw = (w - 4) // cols
-        bh = (h - by - 2) // rows
         self.keymap = {}
-        for n, btn in enumerate(btns):
-            r, c = divmod(n, cols)
-            wid = self.BTN0 + n
-            self.keymap[wid] = btn
-            self.widget(wid, "B", 4 + c * bw, by + r * bh, bw - 3, bh - 6, hexcolor(btn.get("color"), C_BTN),
-                        hexcolor(btn.get("text_color"), C_TEXT), hexcolor(btn.get("lit_color"), C_BTN_ON), 1, 0,
-                        self.button_lit(btn), self.button_label(btn))
+        self.button_grid(btns, 4, by, w - 4, h - by - 2, cols, self.BTN0)
 
-    def draw_keypad(self):
+    # Keypad keys: a text is typed into the command line ("Please", "Clear", "<-"
+    # and "Back" do what they say); an action dict does that action, e.g.
+    # {"label": "Enter", "cmdline": "please"}, {"label": "Go", "osc": "/go"}.
+    CMDLINE_KEYS = {"please": "Please", "clear": "Clear", "backspace": "<-"}
+
+    def draw_keypad(self, spec=None):
         w, h = self.w, self.h
         top = self.header_h() + 4
         self.keymap = {}
         self.widget(self.CMDLINE, "L", 4, top, w - 8, 40, "000000", C_CMD, "000000", 1, 1, 0,
                     self.keypad_text())
         ky = top + 44
-        bw = (w - 4) // 5
-        bh = (h - ky - 2) // 5
-        for r, row in enumerate((self.b.cfg.get("keypad") or self.KEYPAD)[:5]):
-            for c, label in enumerate(row[:5]):
+        rows = ((spec or {}).get("keys") or self.b.cfg.get("keypad") or self.KEYPAD)[:5]
+        cols = max(1, min(5, max(len(r) for r in rows) if rows else 5))
+        bw = (w - 4) // cols
+        bh = (h - ky - 2) // max(1, len(rows))
+        for r, row in enumerate(rows):
+            for c, key in enumerate(row[:cols]):
                 wid = self.KEY0 + r * 5 + c
-                self.keymap[wid] = {"keypad": label}
-                digit = label.isdigit() or label == "."
-                color = C_BTN_ON if label == "Please" else C_BTN if digit else C_KEY2
+                if isinstance(key, dict):  # an action
+                    label = str(key.get("label", "?"))
+                    self.keymap[wid] = key
+                    color = C_BTN_ON if key.get("cmdline") == "please" else C_KEY2
+                else:
+                    label = str(key)
+                    self.keymap[wid] = {"keypad": label}
+                    digit = label.isdigit() or label == "."
+                    color = C_BTN_ON if label == "Please" else C_BTN if digit else C_KEY2
                 font = 0 if self.portrait and len(label) > 3 else 1
-                self.widget(wid, "B", 4 + c * bw, ky + r * bh, bw - 3, bh - 4, color, C_TEXT, C_BTN_ON,
+                bg = hexcolor(key.get("color"), color) if isinstance(key, dict) else color
+                self.widget(wid, "B", 4 + c * bw, ky + r * bh, bw - 3, bh - 4, bg, C_TEXT, C_BTN_ON,
                             font, 0, 0, label)
+
+    # ---- a profile's own screens: "screens": {"name": {"title", "columns",
+    # "buttons": [actions with "label", "lit", colours], "back": "main"}}; open
+    # one with {"screen": "name"}. {"type": "keypad", "keys": [...]} makes a
+    # keypad screen (the built-in one is "keypad").
+    def custom_screen(self, name):
+        spec = (self.b.cfg.get("screens") or {}).get(name)
+        return spec if isinstance(spec, dict) else None
+
+    @staticmethod
+    def grid_columns(n, portrait, given=None):
+        """Columns for n buttons: as given, else what suits the count."""
+        if given:
+            return max(1, int(given))
+        if portrait:
+            return 1 if n <= 1 else 2 if n <= 4 else 3 if n <= 9 else 4
+        return max(1, n) if n <= 3 else 4 if n <= 8 else 5
+
+    def button_grid(self, btns, x, y, w, h, cols, wid0, font=1):
+        rows = max(1, -(-len(btns) // cols))
+        bw, bh = w // cols, h // rows
+        for n, btn in enumerate(btns):
+            r, c = divmod(n, cols)
+            wid = wid0 + n
+            self.keymap[wid] = btn
+            self.widget(wid, "B", x + c * bw, y + r * bh, bw - 3, bh - 6, hexcolor(btn.get("color"), C_BTN),
+                        hexcolor(btn.get("text_color"), C_TEXT), hexcolor(btn.get("lit_color"), C_BTN_ON),
+                        0 if self.portrait and cols > 3 else font, 0, self.button_lit(btn), self.button_label(btn))
+
+    def draw_custom(self, spec):
+        w, h = self.w, self.h
+        top = self.header_h() + 4
+        self.keymap = {}
+        if spec.get("title"):
+            self.widget(self.CMDLINE, "L", 4, top, w - 8, 36, C_PANEL, C_TEXT, C_PANEL, 1, 0, 0,
+                        self.fmt(spec["title"]))
+            top += 40
+        btns = [b for b in (spec.get("buttons") or []) if isinstance(b, dict)][:25]
+        back = spec.get("back", "main")
+        bottom = h - (62 if back else 4)
+        cols = self.grid_columns(len(btns), self.portrait, spec.get("columns"))
+        self.button_grid(btns, 4, top, w - 4, bottom - top, cols, self.KEY0)
+        if back:
+            self.keymap[self.BACK] = {"back": back}
+            self.widget(self.BACK, "B", 4, h - 58, w - 8, 54, C_KEY2, C_TEXT, C_BTN_ON, 1, 0, 0, "Back")
 
     def back_button(self):
         self.keymap[self.BACK] = {"back": True}
@@ -1240,8 +1297,8 @@ class Screen:
             self.widget(base + 4, "L", 4, y, w - 8, 26, C_PANEL, C_DIM, C_PANEL, 0 if not self.enc_mode else 1,
                         1, 0, title)
             vh = ph - 26 - 62
-            if not self.enc_simple:
-                self.keymap[base + 1] = {"entry": i}  # tap the value to type one
+            if b.enc_click(i) == "pad":
+                self.keymap[base + 1] = {"entry": i}  # tap the value to set one
             self.widget(base + 1, "B", 8, y + 28, w - 16, vh, C_PANEL, C_TEXT, C_PANEL, 2, 0, 0, "")
             by, bh = y + 30 + vh, ph - 30 - vh - 10
             self.widget(base + 2, "B", 8, by, w - 16, bh, C_BTN, C_TEXT, C_BTN_ON, 1, 0, 0, "")
@@ -1351,8 +1408,7 @@ class Screen:
 
     def show_sets(self, i):
         """Fill the named-value buttons from the current scroll row."""
-        a = self.b.encoder_attr(i)
-        sets = self.b.ma["sets"].get(a[0].lower(), []) if a else []
+        sets = self.b.choices(i)
         rows = self.sets_rows
         last_row = max(0, -(-len(sets) // 3) - rows)
         self.sets_page = max(0, min(self.sets_page, last_row))  # first row shown
@@ -1377,8 +1433,7 @@ class Screen:
         """Named values on the open value page, or []."""
         if not self.name.startswith("entry"):
             return []
-        a = self.b.encoder_attr(int(self.name[5:]))
-        return self.b.ma["sets"].get(a[0].lower(), []) if a else []
+        return self.b.choices(int(self.name[5:]))
 
     def scroll_sets(self, d):
         """Encoder turned on the value page: move the highlight through the named
@@ -1399,12 +1454,11 @@ class Screen:
         """Encoder clicked on the value page: apply the highlighted named value,
         or Set the typed number; otherwise just close."""
         i = int(self.name[5:])
-        a = self.b.encoder_attr(i)
         sets = self.entry_sets()
-        if a and 0 <= self.sets_sel < len(sets):
-            self.b.ma_plugin(f"setv {a[0]} {self.sets_sel + 1}")
-        elif a and self.value_entry not in ("", "-", "."):
-            self.b.set_value(a[0], self.value_entry)
+        if 0 <= self.sets_sel < len(sets):
+            self.b.apply_choice(i, self.sets_sel + 1)
+        elif self.value_entry not in ("", "-", "."):
+            self.b.apply_number(i, self.value_entry)
         self.set_screen("encoders")
 
     def draw_value_entry(self, i, keep=False):
@@ -1424,13 +1478,15 @@ class Screen:
         else:
             self.value_entry = ""
             self.sets_page = 0
-            if a and b.ma_linked():
+            ma_choices = b.enc_cfg(i).get("choices", "ma") == "ma" and not b.generic()
+            if a and b.ma_linked() and ma_choices:
                 b.ma["sets"].pop(a[0].lower(), None)
                 b.ma_plugin(f"sets {a[0]}")  # the answer redraws this page
         self.keymap = {}
         self.widget(self.SET_TITLE, "L", 4, top, w - 8, 56, "000000", C_CMD, "000000", 1, 0, 0, self.value_title(i))
         y = top + 60
-        sets = b.ma["sets"].get(a[0].lower(), []) if a else []
+        sets = b.choices(i)
+        pad = b.enc_pad(i)
         if not keep:
             self.sets_sel = -1
         if sets and self.sets_sel < 0:  # highlight the one it is on now ("0 Closed" -> Closed)
@@ -1440,9 +1496,10 @@ class Screen:
                     self.sets_sel = k
                     self.sets_page = max(0, k // 3 - 1)
                     break
-        if sets:  # named values above the number pad
-            sh = 40
-            rows = min(3, -(-len(sets) // 3))
+        if sets:  # named values (above the number pad, or the whole page without one)
+            sh = 40 if pad else 48
+            fit = 3 if pad else max(1, (self.h - 62 - 34 - y) // sh)
+            rows = min(fit, -(-len(sets) // 3))
             self.sets_rows = rows
             sw = (w - 4) // 3
             for n in range(rows * 3):
@@ -1455,6 +1512,9 @@ class Screen:
                 self.widget(self.SET_MORE, "B", 4, y, w - 8, 30, C_PANEL, C_DIM, C_BTN_ON, 0, 0, 0, "")
                 y += 34
             self.show_sets(i)
+        if not pad:  # choices only
+            self.back_button()
+            return
         bw, bh = (w - 4) // 3, (self.h - 4 - y) // 5
         keys = ["7", "8", "9", "4", "5", "6", "1", "2", "3", ".", "0", "<-"]
         for n, k in enumerate(keys):
@@ -1487,7 +1547,11 @@ class Screen:
     ]
 
     def key_choices(self):
-        return self.GENERIC_KEY_CHOICES if self.b.generic() else self.KEY_CHOICES
+        base = self.GENERIC_KEY_CHOICES if self.b.generic() else self.KEY_CHOICES
+        own = [(str(spec.get("title") or name)[:12], {"screen": name})
+               for name, spec in (self.b.cfg.get("screens") or {}).items()
+               if isinstance(spec, dict) and name not in ("main", "keypad", "encoders")]  # those are listed
+        return (base + own)[:24]
 
     def key_label(self, k):
         act = self.key_act(k)
@@ -1498,6 +1562,8 @@ class Screen:
 
     def in_setup(self):
         # setup, key<n> (editing a key), exec<n> (its executor number) - not "keypad"
+        if self.custom_screen(self.name) is not None:
+            return False
         return self.name == "setup" or re.fullmatch(r"(key|exec)\d+", self.name) is not None
 
     @classmethod
@@ -1508,6 +1574,8 @@ class Screen:
             return f"Exec {act['exec']}"
         if "osc" in act:
             return act["osc"]
+        if "label" in act and ("cmdline" in act or "screen" in act):
+            return act["label"]
         for label, a in cls.KEY_CHOICES:
             if a == act:
                 return label
@@ -1517,6 +1585,8 @@ class Screen:
             return act["key"]
         if "label" in act:
             return act["label"]
+        if "screen" in act:
+            return str(act["screen"]).capitalize()
         return "?"
 
     def key_act(self, i):
@@ -1616,6 +1686,8 @@ class Screen:
         return self.b.fb["button_label"].get(k) or btn.get("label", "?")
 
     def button_lit(self, btn):
+        if btn.get("lit") in self.b.fb["lit"]:  # its own feedback address
+            return 1 if self.b.fb["lit"][btn["lit"]] else 0
         k = self.button_index(btn)
         if k is not None and k in self.b.fb["button"]:  # feedback says
             return 1 if self.b.fb["button"][k] else 0
@@ -1627,7 +1699,7 @@ class Screen:
         return 0
 
     def update_buttons(self):
-        if self.name != "main":
+        if self.name != "main" and self.custom_screen(self.name) is None:
             return
         for wid, btn in self.keymap.items():
             if self.button_index(btn) is not None:
@@ -1728,14 +1800,11 @@ class Screen:
                 self.set_screen(f"entry{act['entry']}")
             return
         if "setv" in act:
-            a = self.b.encoder_attr(act["enc"])
-            if a:
-                self.b.ma_plugin(f"setv {a[0]} {act['setv']}")
+            self.b.apply_choice(act["enc"], act["setv"])
             self.set_screen("encoders")
             return
-        if "setpage" in act:  # tap: next three rows, then back to the top
-            a = self.b.encoder_attr(act["enc"])
-            n = len(self.b.ma["sets"].get(a[0].lower(), [])) if a else 0
+        if "setpage" in act:  # tap: next rows, then back to the top
+            n = len(self.b.choices(act["enc"]))
             rows = self.sets_rows
             self.sets_page = self.sets_page + rows if (self.sets_page + rows) * 3 < n else 0
             self.show_sets(act["enc"])
@@ -1745,7 +1814,7 @@ class Screen:
             a = self.b.encoder_attr(i)
             if k == "Set":
                 if a and self.value_entry not in ("", "-", "."):
-                    self.b.set_value(a[0], self.value_entry)
+                    self.b.apply_number(i, self.value_entry)
                 self.set_screen("encoders")
                 return
             if k == "<-":
@@ -1783,7 +1852,8 @@ class Screen:
             else:
                 self.b.ma_key(act["keypad"])
         elif "back" in act:
-            self.set_screen("setup" if re.fullmatch(r"key\d+", self.name) else
+            self.set_screen(act["back"] if isinstance(act["back"], str) else
+                            "setup" if re.fullmatch(r"key\d+", self.name) else
                             "encoders" if self.name.startswith("entry") else
                             f"key{self.name[4:]}" if self.name.startswith("exec") else "main")
         elif "encpage" in act:
@@ -1818,9 +1888,12 @@ class Screen:
 
     def local_key(self, k):
         """The command line, kept here and sent to MA on Please."""
-        if k == "<-":
-            self.cmdline = self.cmdline.rstrip()
-            self.cmdline = self.cmdline[:self.cmdline.rfind(" ") + 1] if " " in self.cmdline else ""
+        if k == "<-":  # a whole keyword ("Fixture "), else one character ("12" -> "1")
+            if self.cmdline.endswith(" "):
+                self.cmdline = self.cmdline.rstrip()
+                self.cmdline = self.cmdline[:self.cmdline.rfind(" ") + 1] if " " in self.cmdline else ""
+            else:
+                self.cmdline = self.cmdline[:-1]
         elif k == "Clear":
             if self.cmdline:
                 self.cmdline = ""
@@ -1918,7 +1991,7 @@ class Bridge:
         self.pi_version = ""
         self.raw_analog = {}                 # Mega analog channel -> last raw reading
         self.last_sent = ""                  # the last OSC message sent (top bar, generic)
-        self.fb = dict(fader={}, fader_name={}, fader_color={}, button={}, button_label={},
+        self.fb = dict(fader={}, fader_name={}, fader_color={}, button={}, button_label={}, lit={},
                        encoder_label={}, encoder_value={}, text=None, status=None, seen=0.0)
         self.fb_rules = []
         self.hold = threading.Event()        # the app wants the port (set) ...
@@ -1980,9 +2053,14 @@ class Bridge:
         for i, f in enumerate(self.cfg.get("faders", [])):  # items' own addresses first
             if f and f.get("feedback"):
                 add(f["feedback"], "fader", i + 1)
-        for k, btn in enumerate(self.cfg.get("touch_buttons", [])):
-            if btn and btn.get("lit"):
-                add(btn["lit"], "button", k + 1)
+        lit = [b for b in self.cfg.get("touch_buttons", []) if isinstance(b, dict)]
+        for spec in (self.cfg.get("screens") or {}).values():
+            if isinstance(spec, dict):
+                lit += [b for b in spec.get("buttons") or [] if isinstance(b, dict)]
+                lit += [k for row in spec.get("keys") or [] for k in row if isinstance(k, dict)]
+        for btn in lit:
+            if btn.get("lit"):
+                add(btn["lit"], "lit", btn["lit"])
         for i, e in enumerate(self.cfg.get("encoders", [])):
             if e and e.get("value"):
                 add(e["value"], "encoder_value", i + 1)
@@ -1996,6 +2074,14 @@ class Bridge:
             m = rx.match(addr)
             if not m:
                 continue
+            if kind == "lit":  # a button's own address
+                val = args[0] if args else None
+                on = val > 0 if isinstance(val, (int, float)) else str(val).lower() in ("1", "on", "true", "yes")
+                self.fb["lit"][fixed] = on
+                self.fb["seen"] = time.time()
+                if self.pi_ready:
+                    self.screen.update_buttons()
+                return True
             n = fixed or (int(m.group(1)) if m.groups() else None)
             val = args[0] if args else None
             self.fb["seen"] = time.time()
@@ -2133,8 +2219,79 @@ class Bridge:
         if self.pi_ready:
             self.screen.update_encoders()
 
+    # ---- what clicking an encoder does (profile: per encoder)
+    #   "click": "pad" (value page), "push" (its push action / OSC) or "none"
+    #   "pad": show the number pad; "choices": "ma" (MA's named values of the
+    #   attribute) or a list [{"label": "Open", "value": 0}, ...]; "set": where a
+    #   generic profile sends the value (default the "set" address, {n})
+    def enc_cfg(self, i):
+        encs = self.cfg["encoders"]
+        return encs[i] if i < len(encs) and isinstance(encs[i], dict) else {}
+
+    def enc_click(self, i):
+        e = self.enc_cfg(i)
+        if "click" in e:
+            return e["click"]
+        if self.generic():
+            return "pad" if e.get("set") or isinstance(e.get("choices"), list) else "push"
+        return "pad" if (self.following(i) or "attribute" in e) else "push"
+
+    def enc_pad(self, i):
+        e = self.enc_cfg(i)
+        return bool(e.get("pad", True if not self.generic() else bool(e.get("set"))))
+
+    def choices(self, i):
+        """Names offered on encoder i's value page."""
+        src = self.enc_cfg(i).get("choices", None if self.generic() else "ma")
+        if isinstance(src, list):
+            return [str(c.get("label", c.get("value", "?"))) if isinstance(c, dict) else str(c) for c in src]
+        if src == "ma" and not self.generic():
+            a = self.encoder_attr(i)
+            return self.ma["sets"].get(a[0].lower(), []) if a else []
+        return []
+
+    def apply_choice(self, i, k):
+        """The k-th (from 1) choice on encoder i's value page."""
+        src = self.enc_cfg(i).get("choices", None if self.generic() else "ma")
+        if isinstance(src, list):
+            if 0 < k <= len(src):
+                c = src[k - 1]
+                if isinstance(c, dict) and "osc" in c:
+                    self.osc_raw(c["osc"], c.get("value", 1))
+                else:
+                    self.send_set(i, c.get("value", c.get("label")) if isinstance(c, dict) else c)
+            return
+        a = self.encoder_attr(i)
+        if a:
+            self.ma_plugin(f"setv {a[0]} {k}")
+
+    def apply_number(self, i, text):
+        """A number typed on encoder i's value page."""
+        if not self.generic():
+            a = self.encoder_attr(i)
+            if a:
+                self.set_value(a[0], text)
+            return
+        try:
+            v = float(text)
+        except ValueError:
+            return
+        self.send_set(i, int(v) if v.is_integer() and self.values("integer") else v)
+
+    def send_set(self, i, value):
+        own = self.enc_cfg(i).get("set")
+        if own:
+            self.osc_raw(own, value)
+        else:
+            self.generic_send("set", i + 1, value)
+
     def encoder_attr(self, i):
         """-> (attribute, display name, MA's value text) encoder i controls, or None."""
+        if self.generic():  # a value page of its own: label + feedback value
+            if self.enc_click(i) != "pad":
+                return None
+            label, value = self.screen.simple_encoder(i)
+            return (f"enc{i + 1}", label, "" if value == "-" else value)
         if self.following(i):
             e = self.ma_encoder(i)
             return (e["attr"], e["pretty"], e["value"]) if e else None
@@ -2143,17 +2300,24 @@ class Bridge:
         return (act["attribute"], act["attribute"], "") if "attribute" in act else None
 
     def encoder_push(self, i, down):
-        """Click: type a value for the encoder's attribute (Coarse/Fine is on the
-        screen). An encoder without an attribute (Page) does its push action."""
+        """Click: the value page for the encoder's attribute, its push action, or
+        nothing - as the profile says (enc_click)."""
+        click = self.enc_click(i)
+        if click == "none":
+            return
+        if click == "pad" and self.pi_ready and self.screen.name.startswith("entry"):
+            if down:
+                self.screen.encoder_click()
+            return
+        if click == "pad" and self.encoder_attr(i):
+            if down and self.pi_ready:
+                self.screen.set_screen(f"entry{i}")
+            return
         if self.generic():
             self.generic_send("push", i + 1, self.onoff("push", down))
             return
-        if self.encoder_attr(i) or self.following(i):
-            if down and self.pi_ready and self.screen.name.startswith("entry"):
-                self.screen.encoder_click()
-            elif down and self.pi_ready and self.encoder_attr(i):
-                self.screen.set_screen(f"entry{i}")
-            return
+        if click == "pad" and self.following(i):
+            return  # following MA onto an empty slot: nothing to set
         act = self.cfg["encoders"][i] if i < len(self.cfg["encoders"]) else {}
         if act and act.get("push"):
             self.do_action(act["push"], down)
@@ -2343,6 +2507,10 @@ class Bridge:
             print(f"OSC send failed: {e}")
 
     def do_action(self, act, down):
+        if "cmdline" in act:  # keypad specials: {"cmdline": "please" | "clear" | "backspace"}
+            if down and act["cmdline"] in Screen.CMDLINE_KEYS:
+                self.ma_key(Screen.CMDLINE_KEYS[act["cmdline"]])
+            return
         if "osc" in act:  # {"osc": "/addr"}: on / off values on press / release (any connection)
             self.osc_raw(act["osc"], self.onoff("key", down, act))
             return

@@ -15,7 +15,9 @@
       "button": "/button/{n}",
       "page": "/page",
       "command": "/command"
-    }
+    },
+    "fader_interval": 0.025,
+    "fader_jump": 5
   },
   "faders": [
     {
@@ -105,7 +107,10 @@
     {
       "follow": true,
       "attribute": "Dimmer",
-      "step": 1
+      "step": 1,
+      "click": "pad",
+      "pad": true,
+      "choices": "ma"
     },
     {
       "follow": true,
