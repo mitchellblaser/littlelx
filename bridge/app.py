@@ -33,6 +33,7 @@ import littlelx as lx  # noqa: E402
 from app_builder import Builder  # noqa: E402
 
 LOG_PATH = os.path.join(os.path.expanduser("~"), "littlelx.log")
+LOG = None  # the app's Log (progress of updates)
 
 
 class Log(io.TextIOBase):
@@ -171,6 +172,29 @@ class Runner:
             print("Fader calibration saved.")
         self.bridge.call(do)
         return problems
+
+    def flash_mega(self, path, done):
+        """Mega firmware (path None = the bundled one): the bridge lets go of the
+        port meanwhile, then finds the controller again."""
+        def work():
+            self.updating = True
+            err = None
+            b = self.bridge
+            port = b.ser.path if b.ser else b.last_port
+            b.hold.set()
+            if not b.held.wait(15):
+                err = "The bridge didn't let go of the controller."
+            else:
+                time.sleep(0.5)  # the port is really closed
+                try:
+                    lx.flash_mega(self.cfg, path, port, progress=lambda p: setattr(LOG, "progress", p))
+                except Exception as e:
+                    err = f"Flashing failed: {e}. Nothing is lost - just flash again."
+                    print(err)
+            b.hold.clear()
+            self.updating = False
+            done(err)
+        threading.Thread(target=work, daemon=True).start()
 
     def update_pi(self, path, done):
         """Touchscreen update: the bridge lets go of the port meanwhile."""
@@ -422,7 +446,29 @@ class FirmwareTab(QWidget):
         lay.addWidget(box)
         mega = QGroupBox("Controller (Arduino Mega)")
         m = QVBoxLayout(mega)
-        m.addWidget(QLabel("Flash mega/littlelx_mega with the Arduino IDE (see the README)."))
+        bundled = lx.mega_firmware()
+        info = QLabel("Flash its firmware over USB. Only the program is replaced: the learned wiring and "
+                      "the active profile stay on the controller. "
+                      + ("This app carries the firmware that matches it." if bundled else
+                         "This copy has no firmware built in: use a littlelx_mega .hex from the GitHub build."))
+        info.setWordWrap(True)
+        m.addWidget(info)
+        mrow = QHBoxLayout()
+        self.mega_builtin = QPushButton("Flash the built-in firmware")
+        self.mega_builtin.setEnabled(bool(bundled))
+        self.mega_builtin.clicked.connect(lambda: self.flash(None))
+        self.mega_file = QPushButton("Flash from file...")
+        self.mega_file.clicked.connect(self.flash_file)
+        mrow.addWidget(self.mega_builtin)
+        mrow.addWidget(self.mega_file)
+        mrow.addStretch()
+        m.addLayout(mrow)
+        self.mbar = QProgressBar()
+        self.mbar.setVisible(False)
+        m.addWidget(self.mbar)
+        self.mmsg = QLabel()
+        self.mmsg.setWordWrap(True)
+        m.addWidget(self.mmsg)
         lay.addWidget(mega)
         ma = QGroupBox("grandMA3 plugin")
         a = QVBoxLayout(ma)
@@ -438,6 +484,37 @@ class FirmwareTab(QWidget):
         self.version.setText(f"Firmware: {s['touchscreen'] or 'not connected'}")
         if self.runner.updating:
             self.bar.setValue(self.log.progress or 0)
+            self.mbar.setValue(self.log.progress or 0)
+
+    def flash_file(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Mega firmware", "", "Arduino firmware (*.hex)")
+        if path:
+            self.flash(path)
+
+    def flash(self, path):
+        if self.runner.updating:
+            return
+        if QMessageBox.question(self, "littlelx", "Flash the controller's firmware now? Keep it plugged in "
+                                "until it's done (about 10 seconds).") != QMessageBox.Yes:
+            return
+        for b in (self.mega_builtin, self.mega_file, self.button):
+            b.setEnabled(False)
+        self.mbar.setVisible(True)
+        self.mbar.setValue(0)
+        self.log.progress = 0
+        self.mmsg.setText("Flashing...")
+
+        def done(err):
+            QTimer.singleShot(0, lambda: self.flashed(err))
+        self.runner.flash_mega(path, done)
+
+    def flashed(self, err):
+        self.mega_builtin.setEnabled(bool(lx.mega_firmware()))
+        self.mega_file.setEnabled(True)
+        self.button.setEnabled(True)
+        self.mbar.setVisible(False)
+        self.mmsg.setText(f"<span style='color:#c0392b'>{err}</span>" if err else
+                          "Flashed and verified. The controller restarts and the bridge reconnects.")
 
     def update(self):
         path, _ = QFileDialog.getOpenFileName(self, "Touchscreen update", "", "littlelx update (*.zip)")
@@ -695,7 +772,8 @@ def hide_dock_icon():
 
 
 def main():
-    log = Log(sys.__stdout__ if sys.__stdout__ and sys.__stdout__.isatty() else None)
+    global LOG
+    log = LOG = Log(sys.__stdout__ if sys.__stdout__ and sys.__stdout__.isatty() else None)
     sys.stdout = sys.stderr = log
     print(f"littlelx app {lx.bridge_version()}")
     app = QApplication(sys.argv)

@@ -2004,6 +2004,7 @@ class Bridge:
         self.pi_heard = 0.0
         self.pi_proto = 0
         self.pi_version = ""
+        self.last_port = None                # where the controller was (Mega flashing)
         self.raw_analog = {}                 # Mega analog channel -> last raw reading
         self.last_sent = ""                  # the last OSC message sent (top bar, generic)
         self.fb = dict(fader={}, fader_name={}, fader_color={}, button={}, button_label={}, lit={},
@@ -2918,6 +2919,7 @@ class Bridge:
             self.ser = connect(self.cfg, stop=lambda: self.hold.is_set() or self.quit.is_set())
             if self.ser is None:
                 continue
+            self.last_port = self.ser.path
             self.pi_ready = False
             self.pi_heard = 0.0
             try:
@@ -3281,6 +3283,39 @@ def save_probe(lines):
     return PROBE_PATH
 
 
+def mega_firmware():
+    """The Mega firmware bundled with this build (the app / .exe), if any."""
+    path = resource("firmware", "littlelx_mega.hex")
+    return path if os.path.exists(path) else None
+
+
+def flash_mega(cfg, path=None, port=None, progress=None):
+    """Write the Mega firmware (a .hex; default: the bundled one) over USB."""
+    import megaflash
+    path = path or mega_firmware()
+    if not path:
+        raise megaflash.FlashError("No firmware file given, and none is bundled with this bridge "
+                                   "(download littlelx-mega-hex from the GitHub build).")
+    port = port or find_port(cfg)
+    if not port:
+        raise megaflash.FlashError("The controller isn't plugged in (no Arduino found).")
+    megaflash.flash(port, path, progress)
+
+
+def flash_mega_cli(cfg, path):
+    import megaflash
+    try:
+        shown = [-1]
+
+        def progress(p):
+            if p != shown[0]:
+                shown[0] = p
+                print(f"\r  {p:3d}%", end="\n" if p >= 100 else "", flush=True)
+        flash_mega(cfg, path or None, progress=progress)
+    except megaflash.FlashError as e:
+        sys.exit(f"\nFlashing failed: {e}\nThe old firmware may be half-written: just flash again.")
+
+
 def show_profiles(cfg):
     print(f"Profiles in {PROFILE_DIR}:")
     for name in list_profiles():
@@ -3580,6 +3615,8 @@ def main():
     ap.add_argument("--test-faders", action="store_true", help="find the fader format MA3 accepts")
     ap.add_argument("--ma-probe", action="store_true", help="show what MA's Lua offers (encoder diagnostics)")
     ap.add_argument("--profiles", action="store_true", help=f"list the profiles (files in {PROFILE_DIR})")
+    ap.add_argument("--flash-mega", metavar="FILE.hex", nargs="?", const="",
+                    help="flash the Arduino Mega firmware (default: the one bundled with this build)")
     ap.add_argument("--use-profile", metavar="NAME", help="make a profile active and store it on the controller")
     ap.add_argument("--verbose", action="store_true", help="print every fader message sent")
     ap.add_argument("--port", help="serial port (default: auto-detect)")
@@ -3610,6 +3647,8 @@ def main():
             test_faders(cfg)
         elif args.ma_probe:
             ma_probe(cfg)
+        elif args.flash_mega is not None:
+            flash_mega_cli(cfg, args.flash_mega)
         elif args.profiles:
             show_profiles(cfg)
         elif args.use_profile:

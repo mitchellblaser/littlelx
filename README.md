@@ -89,8 +89,16 @@ Mega RX3 (pin 15) ◄──────────────── Pi GPIO14 
 Optional: back up the old firmware first, since it's being replaced:
 `avrdude -p m2560 -c wiring -P /dev/cu.usbmodemXXXX -b 115200 -D -U flash:r:old-mega.hex:i`
 
-Open `mega/littlelx_mega/littlelx_mega.ino` in the Arduino IDE, select
-**Arduino Mega or Mega 2560**, and upload. (CI also builds a `.hex`.)
+Easiest: in the littlelx app, **Firmware > Flash the built-in firmware** (the
+app carries the firmware that matches it), or **Flash from file...** with a
+`.hex`. From a terminal: `littlelx.py --flash-mega` (the built app / .exe) or
+`littlelx.py --flash-mega littlelx_mega.ino.hex` (the `littlelx-mega-hex`
+from the GitHub build). Only the program is replaced: the learned wiring and
+the active profile stay on the controller. If it fails halfway, just flash
+again - the bootloader is never touched.
+
+Or open `mega/littlelx_mega/littlelx_mega.ino` in the Arduino IDE, select
+**Arduino Mega or Mega 2560**, and upload.
 
 ### 3. Flash the Pi SD card
 
@@ -222,7 +230,8 @@ there, switches profiles, and opens the littlelx window:
   shows the whole file for anything else. **Open** picks any profile to edit,
   **Save as copy** saves it under a new name, **Save & make active** uses it
   straight away.
-* **Firmware** - update the touchscreen from a littlelx-pi-update.zip.
+* **Firmware** - flash the controller (Mega) with the built-in firmware or a
+  .hex, and update the touchscreen from a littlelx-pi-update.zip.
 * **Calibration** - fader bottom / top (live readings) and the touchscreen.
 * **Log** - what the bridge reports (also in `littlelx.log` in your home folder).
 

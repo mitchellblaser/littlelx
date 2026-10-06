@@ -3,3 +3,5 @@ pi/out/
 pi/app/littlelx
 __pycache__/
 VERSION
+firmware/
+firmware-dl/
