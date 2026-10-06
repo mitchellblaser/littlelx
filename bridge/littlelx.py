@@ -87,7 +87,14 @@ DEFAULTS = {
         "type": "ma3",            # "ma3", or "generic": plain OSC to anything else, at these:
         "generic": {"fader": "/fader/{n}", "key": "/key/{n}", "encoder": "/encoder/{n}",
                     "push": "/encoder/{n}/push", "button": "/button/{n}",
-                    "page": "/page", "command": "/command"},
+                    "page": "/page", "command": "/command", "set": "/encoder/{n}/set"},
+        # generic: the values sent (and fader feedback read the same way)
+        "values": {"fader": [0, 1],     # fader range (bottom, top)
+                   "key": [1, 0],       # keys: pressed, released
+                   "button": [1, 0],    # touchscreen buttons
+                   "push": [1, 0],      # encoder pushes
+                   "encoder": 1,        # per click (x direction)
+                   "integer": False},   # whole numbers (e.g. MIDI-style 0..127)
     },
     # The active profile's name: everything the controller does (connection,
     # faders, keys, encoders, screen) as one JSON file in PROFILE_DIR, also
@@ -226,7 +233,8 @@ def migrate(cfg):
 # The active one is also stored on the controller (setup_blob).
 
 PROFILE_DIR = os.path.join(os.path.expanduser("~"), "littlelx-profiles")
-CONN_KEYS = ("type", "host", "port", "prefix", "listen_port", "fader_type", "generic")
+CONN_KEYS = ("type", "host", "port", "prefix", "listen_port", "fader_type", "generic", "values",
+             "fader_interval", "fader_jump")
 PROFILE_FIELDS = ("faders", "keys", "encoders", "touch_buttons", "keypad", "encoder_attributes", "pickup",
                   "screen", "feedback")
 
@@ -1798,7 +1806,7 @@ class Screen:
         if (not self.b.generic() or act not in buttons or "screen" in act or "page" in act
                 or "osc" in act):  # its own address: do_action sends it
             return False
-        self.b.generic_send("button", buttons.index(act) + 1, value)
+        self.b.generic_send("button", buttons.index(act) + 1, self.b.onoff("button", bool(value), act))
         return True
 
     def on_release(self, wid):
@@ -1885,6 +1893,7 @@ class Bridge:
         self.moved_at = [0.0] * 5            # last physical movement
         self.fader_cmd_at = [0.0] * 5
         self.fader_cmd_pending = [None] * 5
+        self.fader_arg = [None] * 5          # generic: the value last sent, in the profile's range
         self.verbose = False
         self.ma = dict(alive=0.0, page=None, fader={}, run={}, name={}, master={}, cmdline="",
                        busy="", busy_at=0.0, res={}, color={},
@@ -1992,7 +2001,8 @@ class Bridge:
             self.fb["seen"] = time.time()
             scr = self.screen if self.pi_ready else None
             if kind == "fader" and n and isinstance(val, (int, float)):
-                level = max(0.0, min(100.0, float(val) * 100.0))
+                f = self.cfg["faders"][n - 1] if n - 1 < len(self.cfg["faders"]) else {}
+                level = self.fader_level(val, (f or {}).get("range"))
                 self.fb["fader"][n - 1] = level
                 if n - 1 < len(self.fader_pos):
                     self.fader_feedback(n - 1, level)
@@ -2026,6 +2036,31 @@ class Bridge:
         """Generic OSC: e.g. /fader/3 0.5, /key/7 1 (addresses from the profile)."""
         addrs = self.cfg["osc"].get("generic") or DEFAULTS["osc"]["generic"]
         self.osc(addrs.get(what, DEFAULTS["osc"]["generic"][what]).replace("{n}", str(n)), value)
+
+    def values(self, what):
+        v = self.cfg["osc"].get("values") or {}
+        return v.get(what, DEFAULTS["osc"]["values"][what])
+
+    def as_number(self, x):
+        """Whole numbers when the profile asks for them (e.g. 0..127)."""
+        return int(round(x)) if self.values("integer") else float(round(x, 4))
+
+    def fader_value(self, level, rng=None):
+        """0..100 -> the profile's fader range."""
+        lo, hi = rng or self.values("fader")
+        return self.as_number(lo + (hi - lo) * level / 100.0)
+
+    def fader_level(self, v, rng=None):
+        """Fader feedback in the profile's range -> 0..100."""
+        lo, hi = rng or self.values("fader")
+        return max(0.0, min(100.0, (float(v) - lo) * 100.0 / ((hi - lo) or 1)))
+
+    def onoff(self, what, down, act=None):
+        """Pressed / released value: the item's own "on"/"off", else the profile's."""
+        on, off = self.values(what)
+        if act:
+            on, off = act.get("on", on), act.get("off", off)
+        return on if down else off
 
     @staticmethod
     def osc_reader(rx):
@@ -2111,7 +2146,7 @@ class Bridge:
         """Click: type a value for the encoder's attribute (Coarse/Fine is on the
         screen). An encoder without an attribute (Page) does its push action."""
         if self.generic():
-            self.generic_send("push", i + 1, 1 if down else 0)
+            self.generic_send("push", i + 1, self.onoff("push", down))
             return
         if self.encoder_attr(i) or self.following(i):
             if down and self.pi_ready and self.screen.name.startswith("entry"):
@@ -2249,13 +2284,18 @@ class Bridge:
         hist.append((now, value))
         while hist and now - hist[0][0] > self.ECHO_WINDOW:
             hist.pop(0)
-        own = self.cfg["faders"][i].get("osc") if i < len(self.cfg["faders"]) else None
-        if own:  # a profile's own address for this fader: 0..1
-            addr, arg = own, float(round(value / 100.0, 4))
+        f = self.cfg["faders"][i] if i < len(self.cfg["faders"]) else {}
+        if f.get("osc") or self.generic():
+            arg = self.fader_value(value, f.get("range") if f.get("osc") else None)
+            if arg == self.fader_arg[i]:
+                return  # a whole-number range: this move rounds to what was sent
+            self.fader_arg[i] = arg
+        if f.get("osc"):  # a profile's own address for this fader (its own "range" if given)
+            addr = f["osc"]
             self.osc_raw(addr, arg)
         elif self.generic():
-            self.generic_send("fader", i + 1, float(round(value / 100.0, 4)))
-            addr, arg = "fader", value
+            addr = "fader"
+            self.generic_send("fader", i + 1, arg)
         else:
             addr, arg = fader_message(fmt, self.page, self.cfg["faders"][i].get("exec", 201 + i), value)
             self.osc(addr, arg)
@@ -2282,7 +2322,7 @@ class Bridge:
         local = ("osc", "page", "screen", "encpage")  # its own address, or the controller's own pages/screens
         if self.generic() and not (act and any(k in act for k in local)):
             self.keys_down.add(i) if down else self.keys_down.discard(i)
-            self.generic_send("key", i + 1, 1 if down else 0)
+            self.generic_send("key", i + 1, self.onoff("key", down))
             return
         if down:
             self.keys_down.add(i)
@@ -2303,8 +2343,8 @@ class Bridge:
             print(f"OSC send failed: {e}")
 
     def do_action(self, act, down):
-        if "osc" in act:  # {"osc": "/addr"}: 1 on press, 0 on release (any connection)
-            self.osc_raw(act["osc"], 1 if down else 0)
+        if "osc" in act:  # {"osc": "/addr"}: on / off values on press / release (any connection)
+            self.osc_raw(act["osc"], self.onoff("key", down, act))
             return
         if "exec" in act:
             self.osc(f"/Page{self.page}/Key{act['exec']}", 1 if down else 0)
@@ -2422,7 +2462,7 @@ class Bridge:
             if d and e.get("reverse"):
                 d = -d
             if d and self.generic():
-                self.generic_send("encoder", i + 1, d)
+                self.generic_send("encoder", i + 1, self.as_number(d * self.values("encoder")))
             elif d and self.pi_ready and self.screen.scroll_sets(d):
                 pass  # scrolled the named values on the screen
             elif d and self.following(i):
