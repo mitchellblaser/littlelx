@@ -252,29 +252,67 @@ on the controller.
   "connection": {
     "type": "ma3",              // or "generic": plain OSC to anything else
     "host": "192.168.1.20", "port": 8000, "prefix": "/gma3", "listen_port": 9000,
-    "generic": {                // generic: where faders/keys/encoders go ({n} = number)
-      "fader": "/fader/{n}",    //   value 0..1
+    "generic": {                // generic: where things are sent ({n} = number)
+      "fader": "/fader/{n}",    //   level 0..1
       "key": "/key/{n}",        //   1 pressed, 0 released
       "encoder": "/encoder/{n}",//   +clicks / -clicks
       "push": "/encoder/{n}/push",
-      "button": "/button/{n}"   //   touchscreen buttons
+      "button": "/button/{n}",  //   touchscreen buttons
+      "page": "/page",          //   page number (Page -/+)
+      "command": "/command"     //   the keypad's command line, on Please
     }
   },
-  "faders": [{"exec": 201, "name": ""}, {"osc": "/my/level"}, ...],   // 5
-  "keys": [{"page": -1}, {"exec": 301}, {"osc": "/go"}, ...],          // 20
-  "encoders": [{"follow": true, "attribute": "Dimmer", "step": 1}, {"page": 1}],
-  "touch_buttons": [{"label": "Go", "osc": "/go"}, {"label": "Keypad", "screen": "keypad"}, ...],
-  "keypad": [["Fixture", "7", "8", "9", "Thru"], ...]                    // 5 rows of 5
+  "faders": [{"exec": 201, "name": "Front", "color": "e0a020"},
+             {"osc": "/my/level", "feedback": "/my/level/state"}, ...],    // 5
+  "keys": [{"page": -1}, {"exec": 301}, {"osc": "/go"}, ...],              // 20
+  "encoders": [{"follow": true, "attribute": "Dimmer", "step": 1},         // ma3
+               {"label": "Speed", "value": "/speed/display"}],              // generic
+  "touch_buttons": [{"label": "Go", "osc": "/go", "lit": "/go/running",
+                     "color": "1f7a3a", "lit_color": "c03030", "text_color": "ffffff"},
+                    {"label": "Keypad", "screen": "keypad"}, ...],
+  "keypad": [["Fixture", "7", "8", "9", "Thru"], ...],                     // 5 rows of 5
+  "screen": {                   // what the touchscreen shows (all optional)
+    "left": "Page {page}",      //   top bar left: text, {page} / {profile}
+    "middle": "cmdline",        //   "cmdline" (MA), "sent" (last OSC sent),
+                                //   "feedback" (from the "text" address) or text
+    "status": "ma",             //   "ma" (MA3 linked), "osc" (where to; green while
+                                //   OSC comes back), "feedback" or text
+    "encoders": "ma",           //   "ma" (follow MA's encoders) or "simple"
+    "encoders_title": "Encoders",
+    "encoder_strip": true,      //   the small encoder line on main / keypad
+    "colors": {"background": "101418", "panel": "1c2430", "text": "ffffff",
+               "dim": "8899aa", "button": "2c3546", "button_lit": "c08a1e",
+               "key": "3a4458", "bar": "2f7de1", "bar_background": "232b38",
+               "command": "ffd36b", "ok": "38c172", "waiting": "5a6578",
+               "programmer": "ff4b3e", "value": "a4acb8", "strip": "161d28"}
+  },
+  "feedback": {                 // generic: OSC coming back (to listen_port)
+    "fader": "/fader/{n}",      //   level 0..1: bar + catch-up arrows
+    "fader_name": "/fader/{n}/name", "fader_color": "/fader/{n}/color",
+    "button": "/button/{n}/state",   //   lit when > 0 / "on"
+    "button_label": "/button/{n}/label",
+    "encoder_label": "/encoder/{n}/label", "encoder_value": "/encoder/{n}/value",
+    "text": "/text", "status": "/status", "page": "/page"
+  }
 }
 ```
 
+Leave out what you don't need: a profile without `"screen"` gets the defaults
+for its connection type (grandMA3: MA's command line, "MA3 linked", MA's
+encoders; generic: the profile name, the last OSC sent, the OSC target, simple
+encoders), and a generic profile without `"feedback"` listens on the addresses
+above. With grandMA3 the plugin reports MA's state; a `"feedback"` section there
+adds to it.
+
 Actions (keys, touchscreen buttons, encoder pushes): `{"exec": 201}` (executor
 button), `{"key": "Store"}` (command-line key), `{"cmd": "Go+"}` (command right
-away), `{"page": 1}`, `{"screen": "keypad"}`, `{"resolution": "Dimmer"}`, and
-`{"osc": "/any/address"}` (sends 1 on press, 0 on release - with any
-connection). A fader with `"osc"` sends its level 0..1 there. In a `generic`
-profile, keys and buttons without their own `"osc"` send to the `generic`
-addresses.
+away; generic: to the command address), `{"page": 1}`, `{"screen": "keypad"}`,
+`{"resolution": "Dimmer"}`, and `{"osc": "/any/address"}` (sends 1 on press, 0
+on release - with any connection). A fader with `"osc"` sends its level 0..1
+there. In a `generic` profile, keys and buttons without their own `"osc"` send
+to the `generic` addresses (Page and screen buttons still work locally).
+Colours: fader colours come from feedback, then MA's sequence colour, then the
+profile's `"color"`.
 
 ## Default layout (all of it is in the active profile, below)
 

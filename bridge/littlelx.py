@@ -86,7 +86,8 @@ DEFAULTS = {
         "fader_type": "i",        # how faders are sent; --test-faders picks it (see FADER_FORMATS)
         "type": "ma3",            # "ma3", or "generic": plain OSC to anything else, at these:
         "generic": {"fader": "/fader/{n}", "key": "/key/{n}", "encoder": "/encoder/{n}",
-                    "push": "/encoder/{n}/push", "button": "/button/{n}"},
+                    "push": "/encoder/{n}/push", "button": "/button/{n}",
+                    "page": "/page", "command": "/command"},
     },
     # The active profile's name: everything the controller does (connection,
     # faders, keys, encoders, screen) as one JSON file in PROFILE_DIR, also
@@ -226,7 +227,35 @@ def migrate(cfg):
 
 PROFILE_DIR = os.path.join(os.path.expanduser("~"), "littlelx-profiles")
 CONN_KEYS = ("type", "host", "port", "prefix", "listen_port", "fader_type", "generic")
-PROFILE_FIELDS = ("faders", "keys", "encoders", "touch_buttons", "keypad", "encoder_attributes", "pickup")
+PROFILE_FIELDS = ("faders", "keys", "encoders", "touch_buttons", "keypad", "encoder_attributes", "pickup",
+                  "screen", "feedback")
+
+# What the touchscreen shows, per connection type; a profile's "screen" overrides
+# any of it. Texts may use {page} and {profile}.
+#   left / middle / status: the top bar. middle: "cmdline" (MA's command line),
+#     "sent" (the last OSC message sent), "feedback" (text from OSC, see below)
+#     or any text. status: "ma" (MA3 linked/online), "osc" (where to + whether
+#     anything comes back), "feedback", or any text.
+#   encoders: "ma" (follow MA's encoder bar) or "simple" (label + value each)
+#   encoder_strip: the small encoder line on the main and keypad pages
+SCREEN_DEFAULTS = {
+    "ma3": {"left": "Page {page}", "middle": "cmdline", "status": "ma", "encoders": "ma",
+            "encoder_strip": True, "encoders_title": "Encoders"},
+    "generic": {"left": "{profile}", "middle": "sent", "status": "osc", "encoders": "simple",
+                "encoder_strip": True, "encoders_title": "Encoders"},
+}
+# Generic profiles: OSC coming back (to listen_port) that drives the screen.
+# A profile's "feedback" replaces this; items can also have their own:
+# faders "feedback", touch buttons "lit", encoders "value" (exact addresses).
+#   fader: level 0..1 (bar + catch-up arrows)  fader_name / fader_color ("rrggbb")
+#   button: lit when > 0 / "on" / true       button_label
+#   encoder_label / encoder_value             text (top bar)  status  page
+FEEDBACK_DEFAULT = {
+    "fader": "/fader/{n}", "fader_name": "/fader/{n}/name", "fader_color": "/fader/{n}/color",
+    "button": "/button/{n}/state", "button_label": "/button/{n}/label",
+    "encoder_label": "/encoder/{n}/label", "encoder_value": "/encoder/{n}/value",
+    "text": "/text", "status": "/status", "page": "/page",
+}
 
 
 def profile_from_cfg(cfg):
@@ -799,6 +828,16 @@ def esc(text):
     return str(text).replace("\n", "\\n")
 
 
+def theme_line(line, swap):
+    """Recolour a screen command: default colours -> the profile's theme."""
+    p = line.split(" ")
+    idx = range(7, 10) if p[0] == "W" and len(p) > 10 else range(2, 5) if p[0] == "C" and len(p) >= 5 \
+        else range(1, 2) if p[0] == "BG" and len(p) == 2 else ()
+    for k in idx:
+        p[k] = swap.get(p[k], p[k])
+    return " ".join(p) if idx else line
+
+
 def bgr(color):
     """'rrggbb' -> 'bbggrr'."""
     return color[4:6] + color[2:4] + color[:2] if len(color) == 6 else color
@@ -816,6 +855,12 @@ def bgr_line(line):
     else:
         return line
     return " ".join(p)
+
+
+def hexcolor(v, default):
+    """A profile/feedback colour ("rrggbb" or "#rrggbb") or the default."""
+    v = str(v or "").lstrip("#").lower()
+    return v if re.fullmatch(r"[0-9a-f]{6}", v) else default
 
 
 def shade(color, f):
@@ -837,6 +882,15 @@ def res_label(f):
 C_PROG = "ff4b3e"  # programmer values: red, like MA
 C_VALUE = "a4acb8"  # values not in the programmer: grey, like MA
 C_STRIP = "161d28"  # main page: the encoder strip under the status bar
+
+# Theme names for the screen's colours: a profile's "screen": {"colors": {...}}
+# replaces any of them (hex "rrggbb").
+THEME = {"background": C_BG, "panel": C_PANEL, "text": C_TEXT, "dim": C_DIM, "button": C_BTN,
+         "button_lit": C_BTN_ON, "key": C_KEY2, "bar": C_BAR, "bar_background": C_BAR_BG,
+         "command": C_CMD, "ok": C_OK, "waiting": C_WAIT, "programmer": C_PROG, "value": C_VALUE,
+         "strip": C_STRIP}
+
+
 FEATURE_COLORS = {  # encoder headers, by MA feature group
     "dimmer": "d8b020", "position": "3a7bd5", "gobo": "3aa655", "color": "b03ab8",
     "beam": "d07a2a", "focus": "2aa8a8", "control": "7a8590", "shapers": "b84848", "video": "5a5ac8",
@@ -884,6 +938,7 @@ class Screen:
         self.sets_rows = 3
         self.sets_sel = -1     # highlighted named value (encoder turns move it)
         self.enc_tabs = False  # encoders page drawn with a tab row
+        self.enc_simple = False  # encoders page: label + value (generic), not MA's
         self.tab_page = 0
         self.tab_paged = False  # tabs paged by hand: don't jump back to the current one
         self.cmdline = ""      # local command line (used when MA isn't linked)
@@ -898,6 +953,11 @@ class Screen:
         return self.h > self.w
 
     def send(self, line):
+        colors = (self.b.cfg.get("screen") or {}).get("colors")
+        if colors:
+            swap = {THEME[k]: str(v).lstrip("#").lower() for k, v in colors.items()
+                    if k in THEME and re.fullmatch(r"#?[0-9a-fA-F]{6}", str(v))}
+            line = theme_line(line, swap)
         if self.b.cfg.get("screen_bgr", True):
             line = bgr_line(line)
         self.b.to_pi(line)
@@ -954,23 +1014,40 @@ class Screen:
     ENC_STRIP_H = 20  # the two encoders, small, under the status bar
     STRIP_SCREENS = ("main", "keypad")
 
+    def strip_on(self):
+        return self.name in self.STRIP_SCREENS and bool(self.b.screen_opt("encoder_strip"))
+
+    def fmt(self, text):
+        b = self.b
+        try:
+            return str(text).format(page=b.page, profile=b.cfg.get("profile", ""))
+        except (KeyError, IndexError, ValueError):
+            return str(text)
+
     def header_h(self):
-        strip = self.ENC_STRIP_H if self.name in self.STRIP_SCREENS else 0
+        strip = self.ENC_STRIP_H if self.strip_on() else 0
         return (54 if self.portrait else 30) + strip
 
     def mid_text(self):
         b = self.b
         if self.cmdline:  # the line being built here
             return "> " + self.cmdline
-        if b.ma_linked():  # else whatever is on MA's own line (typed at the desk)
-            line = b.ma["busy"] or b.ma["cmdline"]
-            return "> " + line if line else ">"
-        return b.last_cmd
+        mode = b.screen_opt("middle")
+        if mode == "cmdline":
+            if b.ma_linked():  # whatever is on MA's own line (typed at the desk)
+                line = b.ma["busy"] or b.ma["cmdline"]
+                return "> " + line if line else ">"
+            return b.last_cmd
+        if mode == "sent":
+            return b.last_sent
+        if mode == "feedback":
+            return b.fb["text"] or ""
+        return self.fmt(mode)
 
     def header(self):
         w = self.w
-        page = f"Page {self.b.page}"
-        strip = self.name in self.STRIP_SCREENS
+        page = self.fmt(self.b.screen_opt("left"))
+        strip = self.strip_on()
         sy = 30  # the encoder strip sits right under the status bar
         if strip:
             half = w // 2
@@ -999,7 +1076,10 @@ class Screen:
             return
         b = self.b
         for i, wid in enumerate((self.HDR_ENC1, self.HDR_ENC2)):
-            if b.ma_encoders_on():
+            if b.screen_opt("encoders") == "simple":
+                label, value = self.simple_encoder(i)
+                text, fg = f" {i + 1}  {label}  {value}", C_VALUE
+            elif b.ma_encoders_on():
                 e = b.ma_encoder(i)
                 text = f" {i + 1}  {e['pretty']}  {e['value'] or '-'}" if e else f" {i + 1}  -"
                 fg = C_PROG if e and e["prog"] else C_VALUE
@@ -1010,14 +1090,23 @@ class Screen:
 
     def update_header(self):
         b = self.b
-        if b.ma_linked():
-            text, color = "MA3 linked", C_OK
-        elif b.ma_seen and time.time() - b.ma_seen < 5:
-            text, color = "MA3 online", C_OK
+        mode = b.screen_opt("status")
+        if mode == "ma":
+            if b.ma_linked():
+                text, color = "MA3 linked", C_OK
+            elif b.ma_seen and time.time() - b.ma_seen < 5:
+                text, color = "MA3 online", C_OK
+            else:
+                text, color = f"OSC > {b.cfg['osc']['host']}", C_DIM
+        elif mode == "osc":  # where to, green while anything comes back
+            alive = b.ma_seen and time.time() - b.ma_seen < 5  # any OSC coming back
+            text, color = f"OSC > {b.cfg['osc']['host']}:{b.cfg['osc']['port']}", C_OK if alive else C_DIM
+        elif mode == "feedback":
+            text, color = b.fb["status"] or "", C_DIM
         else:
-            text, color = f"OSC > {b.cfg['osc']['host']}", C_DIM
+            text, color = self.fmt(mode), C_DIM
         self.setw(self.HDR_STATUS, text=text, colors=(C_PANEL, color, C_PANEL))
-        self.setw(self.HDR_PAGE, text=f"Page {b.page}")
+        self.setw(self.HDR_PAGE, text=self.fmt(b.screen_opt("left")))
         self.setw(self.HDR_MID, text=self.mid_text())
 
     def draw(self):
@@ -1061,8 +1150,9 @@ class Screen:
             r, c = divmod(n, cols)
             wid = self.BTN0 + n
             self.keymap[wid] = btn
-            self.widget(wid, "B", 4 + c * bw, by + r * bh, bw - 3, bh - 6, btn.get("color", C_BTN),
-                        C_TEXT, C_BTN_ON, 1, 0, self.button_lit(btn), btn.get("label", "?"))
+            self.widget(wid, "B", 4 + c * bw, by + r * bh, bw - 3, bh - 6, hexcolor(btn.get("color"), C_BTN),
+                        hexcolor(btn.get("text_color"), C_TEXT), hexcolor(btn.get("lit_color"), C_BTN_ON), 1, 0,
+                        self.button_lit(btn), self.button_label(btn))
 
     def draw_keypad(self):
         w, h = self.w, self.h
@@ -1087,6 +1177,14 @@ class Screen:
         self.keymap[self.BACK] = {"back": True}
         self.widget(self.BACK, "B", 4, self.h - 58, self.w - 8, 54, C_KEY2, C_TEXT, C_BTN_ON, 1, 0, 0, "Back")
 
+    def simple_encoder(self, i):
+        """'simple' encoders page: (label, value) from feedback or the profile."""
+        b = self.b
+        encs = b.cfg["encoders"]
+        e = encs[i] if i < len(encs) and encs[i] else {}
+        label = b.fb["encoder_label"].get(i) or e.get("label") or f"Encoder {i + 1}"
+        return label, b.fb["encoder_value"].get(i) or "-"
+
     def encoder_info(self, i):
         """-> (what it controls, resolution label or None if it has none),
         for an encoder that isn't following MA's encoders."""
@@ -1110,7 +1208,8 @@ class Screen:
         Otherwise (nothing selected in MA) what each encoder is set to."""
         w = self.w
         b = self.b
-        self.enc_mode = b.ma_encoders_on()
+        self.enc_simple = b.screen_opt("encoders") == "simple"
+        self.enc_mode = b.ma_encoders_on() and not self.enc_simple
         top = self.header_h() + 4
         self.keymap = {}
         self.widget(self.ENC_FEAT, "L", 4, top, w - 100, 40, C_PANEL, C_TEXT, C_PANEL, 1, 1, 0, "")
@@ -1133,7 +1232,8 @@ class Screen:
             self.widget(base + 4, "L", 4, y, w - 8, 26, C_PANEL, C_DIM, C_PANEL, 0 if not self.enc_mode else 1,
                         1, 0, title)
             vh = ph - 26 - 62
-            self.keymap[base + 1] = {"entry": i}  # tap the value to type one
+            if not self.enc_simple:
+                self.keymap[base + 1] = {"entry": i}  # tap the value to type one
             self.widget(base + 1, "B", 8, y + 28, w - 16, vh, C_PANEL, C_TEXT, C_PANEL, 2, 0, 0, "")
             by, bh = y + 30 + vh, ph - 30 - vh - 10
             self.widget(base + 2, "B", 8, by, w - 16, bh, C_BTN, C_TEXT, C_BTN_ON, 1, 0, 0, "")
@@ -1172,6 +1272,19 @@ class Screen:
         if self.name != "encoders":
             return
         b = self.b
+        if self.enc_simple:  # label + value per encoder, from the profile / feedback
+            self.setw(self.ENC_FEAT, text=" " + self.fmt(b.screen_opt("encoders_title")),
+                      colors=(C_PANEL, C_TEXT, C_PANEL))
+            self.keymap.pop(self.ENC_PAGE, None)
+            self.setw(self.ENC_PAGE, text="", colors=(C_PANEL, C_DIM, C_PANEL))
+            for i in range(2):
+                base = self.ENC0 + i * 10
+                label, value = self.simple_encoder(i)
+                self.setw(base + 4, text=f" {i + 1}: {label}", colors=(C_PANEL, C_DIM, C_PANEL))
+                self.setw(base + 1, text=value, colors=(C_PANEL, C_TEXT, C_PANEL))
+                self.keymap.pop(base + 2, None)
+                self.setw(base + 2, value=0, text="", colors=(C_PANEL, C_PANEL, C_PANEL))
+            return
         if (b.ma_encoders_on() != self.enc_mode or  # MA started/stopped giving encoders: new layout
                 (b.ma_encoders_on() and (len(b.ma["tabs"]) > 1) != self.enc_tabs)):
             self.draw_encoders()
@@ -1360,6 +1473,21 @@ class Screen:
         ("Enc. 1/2", {"encpage": 1}), ("Nothing", {}),
     ]
 
+    GENERIC_KEY_CHOICES = [  # generic profiles: no MA functions
+        ("Default OSC", None), ("Page -", {"page": -1}), ("Page +", {"page": 1}),
+        ("Keypad", {"screen": "keypad"}), ("Encoders", {"screen": "encoders"}), ("Enc. 1/2", {"encpage": 1}),
+    ]
+
+    def key_choices(self):
+        return self.GENERIC_KEY_CHOICES if self.b.generic() else self.KEY_CHOICES
+
+    def key_label(self, k):
+        act = self.key_act(k)
+        if self.b.generic() and not act:  # sends the profile's key address
+            addrs = self.b.cfg["osc"].get("generic") or DEFAULTS["osc"]["generic"]
+            return addrs.get("key", "/key/{n}").replace("{n}", str(k + 1))
+        return self.describe(act)
+
     def in_setup(self):
         # setup, key<n> (editing a key), exec<n> (its executor number) - not "keypad"
         return self.name == "setup" or re.fullmatch(r"(key|exec)\d+", self.name) is not None
@@ -1417,34 +1545,37 @@ class Screen:
             wid = self.SET0 + k
             learnt = k < len(hw) and hw[k]
             self.keymap[wid] = {"edit": k}
-            what = self.describe(self.key_act(k))
+            what = self.key_label(k)
             if self.portrait and what.startswith("Exec "):
                 what = "Ex " + what[5:]  # 5 across is narrow
             self.widget(wid, "B", 4 + c * bw, gy + r * bh, bw - 3, bh - 4, C_BTN if learnt else C_PANEL,
                         C_TEXT if learnt else C_DIM, C_BTN_ON, 0, 0, 0, f"{k + 1}\n{what}")
+        ma = not self.b.generic()
         self.keymap[self.SET_RESET] = {"reset_keys": True}
-        self.widget(self.SET_RESET, "B", 4, self.h - 104, w - 112, 40, C_PANEL, C_DIM, C_BTN_ON, 0, 0, 0,
-                    "Set all keys back to defaults")
-        self.keymap[self.SET_PROBE] = {"probe": True}
-        self.widget(self.SET_PROBE, "B", w - 104, self.h - 104, 100, 40, C_PANEL, C_DIM, C_BTN_ON, 0, 0, 0,
-                    "MA probe")
+        self.widget(self.SET_RESET, "B", 4, self.h - 104, (w - 112) if ma else (w - 8), 40, C_PANEL, C_DIM,
+                    C_BTN_ON, 0, 0, 0, "Set all keys back to defaults")
+        if ma:  # MA diagnostics
+            self.keymap[self.SET_PROBE] = {"probe": True}
+            self.widget(self.SET_PROBE, "B", w - 104, self.h - 104, 100, 40, C_PANEL, C_DIM, C_BTN_ON, 0, 0, 0,
+                        "MA probe")
         self.back_button()
 
     def draw_key_editor(self, i):
         w = self.w
         top = self.header_h() + 4
         self.keymap = {}
-        self.setup_title(top, f"Key {i + 1}: {self.describe(self.key_act(i))}\nchoose what it does")
+        self.setup_title(top, f"Key {i + 1}: {self.key_label(i)}\nchoose what it does")
+        choices = self.key_choices()
         cols = 4 if self.portrait else 5
-        rows = -(-len(self.KEY_CHOICES) // cols)
+        rows = -(-len(choices) // cols)
         gy = top + 44
         bw, bh = (w - 4) // cols, min(70, (self.h - 62 - gy) // rows)
         cur = self.key_act(i) or {}
-        for n, (label, act) in enumerate(self.KEY_CHOICES):
+        for n, (label, act) in enumerate(choices):
             r, c = divmod(n, cols)
             wid = self.SET0 + n
             self.keymap[wid] = {"assign": i, "choice": act}
-            on = act == cur or (act == "exec" and "exec" in cur)
+            on = (act or {}) == cur or (act == "exec" and "exec" in cur)
             self.widget(wid, "B", 4 + c * bw, gy + r * bh, bw - 3, bh - 4, C_KEY2 if act == "exec" else C_BTN,
                         C_TEXT, C_BTN_ON, 0, 0, 1 if on else 0, label)
         self.back_button()
@@ -1468,7 +1599,18 @@ class Screen:
         self.back_button()
 
     # ---- live updates
+    def button_index(self, btn):
+        buttons = self.b.cfg["touch_buttons"]
+        return buttons.index(btn) if btn in buttons else None
+
+    def button_label(self, btn):
+        k = self.button_index(btn)
+        return self.b.fb["button_label"].get(k) or btn.get("label", "?")
+
     def button_lit(self, btn):
+        k = self.button_index(btn)
+        if k is not None and k in self.b.fb["button"]:  # feedback says
+            return 1 if self.b.fb["button"][k] else 0
         ma = self.b.ma
         if "state" in btn:
             return 1 if ma["master"].get(btn["state"].lower()) else 0
@@ -1480,7 +1622,10 @@ class Screen:
         if self.name != "main":
             return
         for wid, btn in self.keymap.items():
-            self.setw(wid, value=self.button_lit(btn))
+            if self.button_index(btn) is not None:
+                self.setw(wid, value=self.button_lit(btn), text=self.button_label(btn))
+            else:
+                self.setw(wid, value=self.button_lit(btn))
 
     def update_fader(self, i):
         """Redraw fader i soon: faders change far faster than the screen link
@@ -1507,7 +1652,7 @@ class Screen:
         if b.picked[i] and pos is not None and time.time() - b.moved_at[i] < b.HANDS_ON:
             shown = pos  # in your hand: MA's echo lags, show the fader itself
         ex = f.get("exec")
-        name = b.ma["name"].get(ex) if b.ma_linked() and ex else None
+        name = b.fb["fader_name"].get(i) or (b.ma["name"].get(ex) if b.ma_linked() and ex else None)
         name = name or f.get("name") or ((str(ex) if self.portrait else f"Exec {ex}") if ex else f"F{i + 1}")
         if self.portrait:
             name = name[:7]
@@ -1516,8 +1661,11 @@ class Screen:
         if waiting:
             text += "\n" + ("^ ^ ^" if pos < ma else "v v v")
         marker = int(pos * 10) if (ma is not None and pos is not None) else -1
-        # the sequence's colour from MA: dimmed behind, brighter for the level
-        color = b.ma["color"].get(ex) if b.ma_linked() and ex else None
+        # its colour: from feedback, MA's sequence, or the profile; dimmed behind,
+        # brighter for the level
+        color = (hexcolor(b.fb["fader_color"].get(i), None)
+                 or (b.ma["color"].get(ex) if b.ma_linked() and ex else None)
+                 or hexcolor(f.get("color"), None))
         bg, bar = (shade(color, 0.4), shade(color, 0.85)) if color else (C_BAR_BG, C_BAR)
         bg, bar = bg or C_BAR_BG, bar or C_BAR
         self.setw(self.FADER0 + i, value=int((shown or 0) * 10), text=text, marker=marker,
@@ -1760,6 +1908,10 @@ class Bridge:
         self.pi_proto = 0
         self.pi_version = ""
         self.raw_analog = {}                 # Mega analog channel -> last raw reading
+        self.last_sent = ""                  # the last OSC message sent (top bar, generic)
+        self.fb = dict(fader={}, fader_name={}, fader_color={}, button={}, button_label={},
+                       encoder_label={}, encoder_value={}, text=None, status=None, seen=0.0)
+        self.fb_rules = []
         self.hold = threading.Event()        # the app wants the port (set) ...
         self.held = threading.Event()        # ... and has it (set by run)
         self.quit = threading.Event()
@@ -1768,6 +1920,7 @@ class Bridge:
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.rx = None
         self.open_osc()
+        self.build_feedback()
 
     def open_osc(self):
         """(Re)open OSC from cfg["osc"]: where to send, and the feedback port."""
@@ -1795,6 +1948,80 @@ class Bridge:
         """Talking plain OSC to something that isn't MA (a connection profile)."""
         return self.cfg["osc"].get("type", "ma3") == "generic"
 
+    def screen_opt(self, key):
+        """What the touchscreen shows: the profile's "screen", else the defaults
+        for its connection type (MA things only for MA)."""
+        own = self.cfg.get("screen") or {}
+        if key in own:
+            return own[key]
+        return SCREEN_DEFAULTS["generic" if self.generic() else "ma3"][key]
+
+    def build_feedback(self):
+        """The profile's feedback addresses as patterns ({n} = the number)."""
+        fb = self.cfg.get("feedback")
+        if fb is None:
+            fb = FEEDBACK_DEFAULT if self.generic() else {}
+        rules = []
+
+        def add(addr, kind, n=None):
+            if not isinstance(addr, str) or not addr.startswith("/"):
+                return
+            rx = re.escape(addr).replace(r"\{n\}", r"(\d+)")
+            rules.append((re.compile(rx + "$"), kind, n))
+        for i, f in enumerate(self.cfg.get("faders", [])):  # items' own addresses first
+            if f and f.get("feedback"):
+                add(f["feedback"], "fader", i + 1)
+        for k, btn in enumerate(self.cfg.get("touch_buttons", [])):
+            if btn and btn.get("lit"):
+                add(btn["lit"], "button", k + 1)
+        for i, e in enumerate(self.cfg.get("encoders", [])):
+            if e and e.get("value"):
+                add(e["value"], "encoder_value", i + 1)
+        for kind, addr in fb.items():
+            add(addr, kind)
+        self.fb_rules = rules
+
+    def on_feedback(self, addr, args):
+        """OSC from a generic target (or extra feedback in any profile)."""
+        for rx, kind, fixed in self.fb_rules:
+            m = rx.match(addr)
+            if not m:
+                continue
+            n = fixed or (int(m.group(1)) if m.groups() else None)
+            val = args[0] if args else None
+            self.fb["seen"] = time.time()
+            scr = self.screen if self.pi_ready else None
+            if kind == "fader" and n and isinstance(val, (int, float)):
+                level = max(0.0, min(100.0, float(val) * 100.0))
+                self.fb["fader"][n - 1] = level
+                if n - 1 < len(self.fader_pos):
+                    self.fader_feedback(n - 1, level)
+            elif kind in ("fader_name", "fader_color") and n:
+                self.fb[kind][n - 1] = str(val or "").lstrip("#")
+                if scr:
+                    scr.update_fader(n - 1)
+            elif kind == "button" and n:
+                on = val > 0 if isinstance(val, (int, float)) else str(val).lower() in ("1", "on", "true", "yes")
+                self.fb["button"][n - 1] = on
+                if scr:
+                    scr.update_buttons()
+            elif kind == "button_label" and n:
+                self.fb["button_label"][n - 1] = str(val or "")
+                if scr:
+                    scr.update_buttons()
+            elif kind in ("encoder_label", "encoder_value") and n:
+                self.fb[kind][n - 1] = str(val if val is not None else "")
+                if scr:
+                    scr.update_encoders()
+            elif kind in ("text", "status"):
+                self.fb[kind] = str(val if val is not None else "")
+                if scr:
+                    scr.update_header()
+            elif kind == "page" and isinstance(val, (int, float)):
+                self.set_page(int(val), from_ma=True)
+            return True
+        return False
+
     def generic_send(self, what, n, value):
         """Generic OSC: e.g. /fader/3 0.5, /key/7 1 (addresses from the profile)."""
         addrs = self.cfg["osc"].get("generic") or DEFAULTS["osc"]["generic"]
@@ -1813,6 +2040,7 @@ class Bridge:
                 events.put(("osc", None, msg))
 
     def build_maps(self):
+        self.build_feedback()
         hw = self.cfg["hw"]
         self.digital = {}   # pin -> ("key", i) | ("enc", i, "a"/"b"/"push")
         self.analog = {}    # ch -> fader index
@@ -1899,7 +2127,11 @@ class Bridge:
         self.ma_cmd(f'Attribute "{attr}" At {text}')
 
     def ma_fader(self, i):
-        """MA's real level for fader i on the current page, if known."""
+        """The target's real level for fader i (MA, or generic feedback), if known."""
+        if i in self.fb["fader"]:
+            return self.fb["fader"][i]
+        if self.generic():
+            return None
         ex = self.cfg["faders"][i].get("exec")
         if ex is None:
             return None
@@ -1909,13 +2141,17 @@ class Bridge:
 
     # ---- output
     def osc(self, addr, *args):
+        self.last_sent = " ".join([self.prefix + addr] + [str(a) for a in args])
         try:
             self.sock.sendto(osc_message(self.prefix + addr, *args), self.dest)
         except OSError as e:
             print(f"OSC send failed: {e}")
 
     def ma_cmd(self, cmd):
-        self.osc("/cmd", cmd)
+        if self.generic():  # command line / cmd actions: to the profile's command address
+            self.generic_send("command", 0, cmd)
+        else:
+            self.osc("/cmd", cmd)
         self.last_cmd = cmd
         print(f"cmd: {cmd}")
         if self.pi_ready:
@@ -2043,7 +2279,8 @@ class Bridge:
         if not down and i not in self.keys_down:
             return  # its press went to Setup: MA never saw it
         act = self.cfg["keys"][i] if i < len(self.cfg["keys"]) else None
-        if self.generic() and not (act and "osc" in act):  # its own address wins
+        local = ("osc", "page", "screen", "encpage")  # its own address, or the controller's own pages/screens
+        if self.generic() and not (act and any(k in act for k in local)):
             self.keys_down.add(i) if down else self.keys_down.discard(i)
             self.generic_send("key", i + 1, 1 if down else 0)
             return
@@ -2057,6 +2294,9 @@ class Bridge:
 
     def osc_raw(self, addr, *args):
         """An OSC message exactly as given (no prefix): profile "osc" actions."""
+        self.last_sent = " ".join([addr] + [str(a) for a in args])
+        if self.pi_ready and self.screen_opt("middle") == "sent":
+            self.screen.update_cmdline()
         try:
             self.sock.sendto(osc_message(addr, *args), self.dest)
         except OSError as e:
@@ -2089,7 +2329,10 @@ class Bridge:
     def set_page(self, page, from_ma=False):
         page = max(1, page)
         if not from_ma:
-            self.osc("/cmd", f"Page {page}")  # MA follows; the plugin confirms
+            if self.generic():
+                self.generic_send("page", page, page)
+            else:
+                self.osc("/cmd", f"Page {page}")  # MA follows; the plugin confirms
         if page == self.page:
             return
         self.page = page
@@ -2273,6 +2516,8 @@ class Bridge:
         if "/littlelx/" in addr:
             self.on_littlelx(addr.split("/littlelx/", 1)[1], args)
             return
+        if self.on_feedback(addr, args):
+            return
         m = re.search(r"/Page(\d+)/Fader(\d+)$", addr)  # plain MA OSC feedback
         if not m:
             return
@@ -2286,6 +2531,21 @@ class Bridge:
                     self.check_pickup(i)
                     if self.pi_ready:
                         self.screen.update_fader(i)
+
+    def fader_feedback(self, i, v):
+        """The target reports fader i at v (0..100): MA, or generic feedback."""
+        # Moved there by someone else? Then the physical fader must catch it
+        # again. Not if it's just the target reporting one of our own recent
+        # moves late, or the fader is in our hand now.
+        now = time.time()
+        ours = any(abs(v - sv) <= 1.5 for t, sv in self.sent_hist[i] if now - t <= self.ECHO_WINDOW)
+        hands_on = now - self.moved_at[i] < self.HANDS_ON
+        if self.picked[i] and not ours and not hands_on and self.fader_pos[i] is not None \
+                and abs(v - self.fader_pos[i]) > 3:
+            self.picked[i] = not self.cfg.get("pickup", True)
+        self.check_pickup(i)
+        if self.pi_ready:
+            self.screen.update_fader(i)
 
     def check_pickup(self, i):
         """A fader already sitting at MA's level (e.g. 0 % on both after a page
@@ -2317,19 +2577,7 @@ class Bridge:
                 ma["fader"][ex] = v
                 for i, f in enumerate(self.cfg["faders"]):
                     if f.get("exec") == ex:
-                        # Moved in MA by someone else? Then the physical fader must
-                        # catch it again. Not if it's just MA reporting one of our
-                        # own recent moves late, or the fader is in our hand now.
-                        now = time.time()
-                        ours = any(abs(v - sv) <= 1.5 for t, sv in self.sent_hist[i]
-                                   if now - t <= self.ECHO_WINDOW)
-                        hands_on = now - self.moved_at[i] < self.HANDS_ON
-                        if self.picked[i] and not ours and not hands_on and self.fader_pos[i] is not None \
-                                and abs(v - self.fader_pos[i]) > 3:
-                            self.picked[i] = not self.cfg.get("pickup", True)
-                        self.check_pickup(i)
-                        if scr:
-                            scr.update_fader(i)
+                        self.fader_feedback(i, v)
             elif kind == "run":
                 ma["run"][ex] = int(val or 0)
                 if scr:

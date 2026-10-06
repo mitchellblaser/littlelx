@@ -12,7 +12,9 @@
       "key": "/key/{n}",
       "encoder": "/encoder/{n}",
       "push": "/encoder/{n}/push",
-      "button": "/button/{n}"
+      "button": "/button/{n}",
+      "page": "/page",
+      "command": "/command"
     }
   },
   "faders": [
@@ -203,5 +205,12 @@
       "<-",
       "Please"
     ]
-  ]
+  ],
+  "screen": {
+    "left": "Page {page}",
+    "middle": "cmdline",
+    "status": "ma",
+    "encoders": "ma",
+    "encoder_strip": true
+  }
 }

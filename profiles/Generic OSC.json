@@ -12,15 +12,19 @@
       "key": "/key/{n}",
       "encoder": "/encoder/{n}",
       "push": "/encoder/{n}/push",
-      "button": "/button/{n}"
+      "button": "/button/{n}",
+      "page": "/page",
+      "command": "/command"
     }
   },
   "faders": [
     {
-      "name": "F1"
+      "name": "F1",
+      "color": "e0a020"
     },
     {
-      "name": "F2"
+      "name": "F2",
+      "feedback": "/mixer/ch2/level"
     },
     {
       "name": "F3"
@@ -97,23 +101,24 @@
   ],
   "encoders": [
     {
-      "follow": false
+      "label": "Speed"
     },
     {
-      "page": 1,
-      "push": {
-        "screen": "keypad"
-      }
+      "label": "Size",
+      "value": "/size/display"
     }
   ],
   "touch_buttons": [
     {
       "label": "Go",
-      "osc": "/go"
+      "osc": "/go",
+      "lit": "/go/running",
+      "color": "1f7a3a"
     },
     {
       "label": "Stop",
-      "osc": "/stop"
+      "osc": "/stop",
+      "lit_color": "c03030"
     },
     {
       "label": "Back",
@@ -141,5 +146,34 @@
     "Prism1",
     "Frost1"
   ],
-  "pickup": true
+  "pickup": true,
+  "screen": {
+    "left": "{profile}",
+    "middle": "sent",
+    "status": "osc",
+    "encoders": "simple",
+    "encoders_title": "Encoders",
+    "encoder_strip": true,
+    "colors": {
+      "background": "101418",
+      "panel": "1c2430",
+      "button": "2c3546",
+      "button_lit": "c08a1e",
+      "bar": "2f7de1",
+      "bar_background": "232b38",
+      "text": "ffffff"
+    }
+  },
+  "feedback": {
+    "fader": "/fader/{n}",
+    "fader_name": "/fader/{n}/name",
+    "fader_color": "/fader/{n}/color",
+    "button": "/button/{n}/state",
+    "button_label": "/button/{n}/label",
+    "encoder_label": "/encoder/{n}/label",
+    "encoder_value": "/encoder/{n}/value",
+    "text": "/text",
+    "status": "/status",
+    "page": "/page"
+  }
 }
