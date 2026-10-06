@@ -3574,7 +3574,7 @@ def update_pi(cfg, path, progress=None, patience=16):
     new_ver = z.read("VERSION").decode().strip() if "VERSION" in names else "?"
     files = {n: z.read(n) for n in names}
 
-    ser = connect(cfg)
+    ser = None
     try:  # always let go of the controller: the app's bridge takes it back after
 
         def wait(prefixes, timeout):
@@ -3603,13 +3603,22 @@ def update_pi(cfg, path, progress=None, patience=16):
                     return h
             return None
 
-        print("Looking for the touchscreen...")
-        h = hello(patience)
-        if h and patience > 16:
-            # it has just come back: let it settle (it may still be finding the
-            # link speed), then make sure it still answers
-            time.sleep(3)
-            h = hello(patience)
+        # Right after the controller was flashed, the touchscreen can stay
+        # silent on the first connection however long we wait, yet answers at
+        # once after the port is closed and opened again (which restarts the
+        # controller) - so don't wait long on one connection: reconnect.
+        deadline = time.time() + patience
+        h = None
+        while True:
+            ser = connect(cfg)
+            print("Looking for the touchscreen...")
+            h = hello(min(6, max(2, deadline - time.time())))
+            if h or time.time() >= deadline:
+                break
+            print("  no answer yet: reconnecting to the controller...")
+            ser.close()
+            ser = None
+            time.sleep(1)
         if not h:
             sys.exit("The touchscreen isn't answering. Is it powered and showing 'waiting for computer'?")
         parts = h.split()
@@ -3717,7 +3726,8 @@ def update_pi(cfg, path, progress=None, patience=16):
                 return
         print("The touchscreen hasn't come back yet. If it stays blank, see 'Pi updates' in the README.")
     finally:
-        ser.close()
+        if ser:
+            ser.close()
         time.sleep(0.3)
 
 
