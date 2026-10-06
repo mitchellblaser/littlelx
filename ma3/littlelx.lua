@@ -21,14 +21,15 @@
 --   "setv Gobo1 3" apply the 3rd of them to the selection
 --   "__start <osc line> <tick> [Attr,Attr] [version]"   start reporting from a
 --                  Timer (bridge install); also report those attributes'
---                  resolution, and the version so the bridge can update us
+--                  resolution, and the version so the bridge can update us;
+--                  optionally the executors to report ("101-115,201-208")
 --
 -- MA needs an OSC line that SENDS to the bridge computer (its IP, port 9000,
 -- Send = Yes). Its number is passed by the bridge; 2 if run as a plugin.
 local OSC_LINE = 2
 
-local WATCH = {}                    -- executors reported (buttons and faders)
-for i = 101, 115 do WATCH[#WATCH + 1] = i end
+local WATCH = {}                    -- executors reported (buttons and faders);
+for i = 101, 115 do WATCH[#WATCH + 1] = i end -- the bridge sends its own list at start
 for i = 201, 215 do WATCH[#WATCH + 1] = i end
 local MASTERS = { "highlight", "lowlight", "solo", "blind" }
 local ATTRS = { "Dimmer" }          -- attributes whose encoder resolution we report
@@ -137,11 +138,13 @@ local function seq_color(obj)
 	return ok and c or ""
 end
 
+local WATCHSET
 local function watched(no)
-	for _, n in ipairs(WATCH) do
-		if n == no then return true end
+	if not WATCHSET then
+		WATCHSET = {}
+		for _, n in ipairs(WATCH) do WATCHSET[n] = true end
 	end
-	return false
+	return WATCHSET[no] == true
 end
 
 -- ---- MA's encoders ------------------------------------------------------
@@ -813,8 +816,19 @@ end
 
 -- Bridge install: no plugin object, so run from MA's Timer. The Timer API
 -- documents a whole-second delay; try our tick first, fall back to 1 s.
-local function start_timer(line, tick_s, attrs, ver)
+local function start_timer(line, tick_s, attrs, ver, execs)
 	OSC_LINE = num(line) or OSC_LINE
+	if execs and execs ~= "" then -- "101-115,201-208,301"
+		local w = {}
+		for part in execs:gmatch("[^,]+") do
+			local a, b = part:match("^(%d+)%-(%d+)$")
+			a, b = num(a or part), num(b or a or part)
+			if a and b then
+				for i = a, math.min(b, a + 200) do w[#w + 1] = i end
+			end
+		end
+		if #w > 0 then WATCH, WATCHSET = w, nil end
+	end
 	VERSION = ver or ""
 	TICK = num(tick_s) or TICK
 	if attrs and attrs ~= "" then
@@ -840,9 +854,9 @@ end
 
 local function main(display, arg)
 	if arg and arg ~= "" then
-		local line, tick_s, attrs, ver = arg:match("^__start%s+(%S+)%s*(%S*)%s*(%S*)%s*(%S*)")
+		local line, tick_s, attrs, ver, execs = arg:match("^__start%s+(%S+)%s*(%S*)%s*(%S*)%s*(%S*)%s*(%S*)")
 		if line then
-			start_timer(line, tick_s, attrs, ver)
+			start_timer(line, tick_s, attrs, ver, execs)
 		else
 			act(arg)
 		end

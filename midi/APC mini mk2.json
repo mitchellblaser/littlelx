@@ -1,0 +1,189 @@
+{
+  "name": "APC mini mk2",
+  "match": ["APC mini mk2"],
+  "exclude": [],
+  "about": "Akai APC mini mk2 (RGB pads: sequence colours, dim when off, bright when running). Pads: bottom row first, left to right (bottom row = executors 101-108, then 201-208, 301-308, 401-408). Track buttons (under the faders): page -, page +, Clear, Oops, Please, Highlight, Blind, Store. Scene buttons (right): pages 1-8, top first. Faders 1-8: executors 201-208; fader 9: grand master.",
+  "controls": [
+    {
+      "group": "pads",
+      "label": "Pad",
+      "type": "button",
+      "msg": "note",
+      "channel": 1,
+      "numbers": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63],
+      "rows": 8,
+      "cols": 8,
+      "led": "pad"
+    },
+    {
+      "group": "track",
+      "label": "Track button",
+      "type": "button",
+      "msg": "note",
+      "channel": 1,
+      "numbers": [100, 101, 102, 103, 104, 105, 106, 107],
+      "led": "single"
+    },
+    {
+      "group": "scene",
+      "label": "Scene button",
+      "type": "button",
+      "msg": "note",
+      "channel": 1,
+      "numbers": [112, 113, 114, 115, 116, 117, 118, 119],
+      "led": "single"
+    },
+    {
+      "group": "shift",
+      "label": "Shift",
+      "type": "button",
+      "msg": "note",
+      "channel": 1,
+      "numbers": [122]
+    },
+    {
+      "group": "faders",
+      "label": "Fader",
+      "type": "fader",
+      "msg": "cc",
+      "channel": 1,
+      "numbers": [48, 49, 50, 51, 52, 53, 54, 55, 56]
+    }
+  ],
+  "leds": {
+    "pad": {
+      "msg": "note",
+      "off": 0,
+      "palette": [
+        [3, "#ffffff"],
+        [5, "#ff0000"],
+        [9, "#ff5400"],
+        [13, "#ffff00"],
+        [17, "#88ff00"],
+        [21, "#00ff00"],
+        [29, "#00ff55"],
+        [33, "#00ff99"],
+        [37, "#00ffff"],
+        [41, "#0099ff"],
+        [45, "#0000ff"],
+        [49, "#5400ff"],
+        [53, "#ff00ff"],
+        [57, "#ff0054"]
+      ],
+      "idle": {"color": "sequence", "default": "#ffffff", "channel": 2},
+      "on": {"color": "sequence", "default": "#ffffff", "channel": 7}
+    },
+    "single": {
+      "msg": "note",
+      "channel": 1,
+      "off": 0,
+      "idle": "off",
+      "on": {"velocity": 1}
+    }
+  },
+  "map": {
+    "pads": [
+      {"exec": 101},
+      {"exec": 102},
+      {"exec": 103},
+      {"exec": 104},
+      {"exec": 105},
+      {"exec": 106},
+      {"exec": 107},
+      {"exec": 108},
+      {"exec": 201},
+      {"exec": 202},
+      {"exec": 203},
+      {"exec": 204},
+      {"exec": 205},
+      {"exec": 206},
+      {"exec": 207},
+      {"exec": 208},
+      {"exec": 301},
+      {"exec": 302},
+      {"exec": 303},
+      {"exec": 304},
+      {"exec": 305},
+      {"exec": 306},
+      {"exec": 307},
+      {"exec": 308},
+      {"exec": 401},
+      {"exec": 402},
+      {"exec": 403},
+      {"exec": 404},
+      {"exec": 405},
+      {"exec": 406},
+      {"exec": 407},
+      {"exec": 408},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {}
+    ],
+    "track": [
+      {"page": -1},
+      {"page": 1},
+      {"key": "Clear"},
+      {"cmd": "Oops"},
+      {"key": "Please"},
+      {"cmd": "Highlight", "state": "highlight"},
+      {"cmd": "Blind", "state": "blind"},
+      {"key": "Store"}
+    ],
+    "scene": [
+      {"goto_page": 1},
+      {"goto_page": 2},
+      {"goto_page": 3},
+      {"goto_page": 4},
+      {"goto_page": 5},
+      {"goto_page": 6},
+      {"goto_page": 7},
+      {"goto_page": 8}
+    ],
+    "shift": [
+      {}
+    ],
+    "faders": [
+      {"exec": 201},
+      {"exec": 202},
+      {"exec": 203},
+      {"exec": 204},
+      {"exec": 205},
+      {"exec": 206},
+      {"exec": 207},
+      {"exec": 208},
+      {
+        "cmd": "Master 2.1 At {v}",
+        "label": "Grand master"
+      }
+    ]
+  }
+}

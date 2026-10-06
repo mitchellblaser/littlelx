@@ -7,6 +7,7 @@ writes it back.
 """
 import copy
 import json
+import os
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor
@@ -63,6 +64,8 @@ def describe(act):
             return f.format(act[k])
     if "page" in act:
         return "Page +" if int(act["page"]) > 0 else "Page -"
+    if "goto_page" in act:
+        return f"Page {act['goto_page']}"
     if "encpage" in act:
         return "Encoder pair 1/2"
     return "-"
@@ -111,7 +114,7 @@ class ColorEdit(QWidget):
 
 ACTION_TYPES = [
     ("Executor button", "exec"), ("Command-line key", "key"), ("Command", "cmd"), ("OSC message", "osc"),
-    ("Page - / Page +", "page"), ("Open a screen", "screen"), ("Keypad special key", "cmdline"),
+    ("Page - / Page +", "page"), ("Go to page", "goto_page"), ("Open a screen", "screen"), ("Keypad special key", "cmdline"),
     ("MA Coarse/Fine", "resolution"), ("Encoder pair 1/2", "encpage"), ("Nothing", None),
 ]
 CMD_KEYS = ["Please", "Clear", "<-", "Store", "Update", "Fixture", "Group", "Preset", "Cue", "Sequence",
@@ -170,6 +173,10 @@ class ActionDialog(QDialog):
         self.page_dir.addItem("Page +", 1)
         self.page_dir.setCurrentIndex(1 if int(act.get("page", -1)) > 0 else 0)
         page("page", [("", self.page_dir)])
+        self.goto = QSpinBox()
+        self.goto.setRange(1, 9999)
+        self.goto.setValue(int(act.get("goto_page", 1)))
+        page("goto_page", [("Page", self.goto)])
         self.screen = QComboBox()
         self.screen.setEditable(True)
         self.screen.addItems(["main", "keypad", "encoders", "setup"] + [s for s in screens if s not in
@@ -230,6 +237,8 @@ class ActionDialog(QDialog):
                 a["off"] = num_or_text(self.off.text())
         elif t == "page":
             a["page"] = self.page_dir.currentData()
+        elif t == "goto_page":
+            a["goto_page"] = self.goto.value()
         elif t == "screen":
             a["screen"] = self.screen.currentText().strip()
         elif t == "cmdline":
@@ -987,6 +996,249 @@ class FeedbackPage(QWidget):
 
 # ---------------------------------------------------------------- the Builder
 
+class FaderDialog(QDialog):
+    """What a fader that isn't one of the controller's five does (MIDI, modules):
+    the same choices as those."""
+
+    KINDS = [("Executor fader", "exec"), ("OSC address", "osc"), ("Command (e.g. Master 2.1 At {v})", "cmd"),
+             ("Nothing", None)]
+
+    def __init__(self, parent, item):
+        super().__init__(parent)
+        self.setWindowTitle("Fader")
+        item = dict(item or {})
+        form = QFormLayout(self)
+        self.kind = QComboBox()
+        for name, k in self.KINDS:
+            self.kind.addItem(name, k)
+        cur = next((k for _, k in self.KINDS if k and k in item), None)
+        self.kind.setCurrentIndex([k for _, k in self.KINDS].index(cur))
+        form.addRow("Does", self.kind)
+        self.exec_no = QSpinBox()
+        self.exec_no.setRange(1, 9999)
+        self.exec_no.setValue(int(item.get("exec", 201)))
+        form.addRow("Executor", self.exec_no)
+        self.osc = QLineEdit(text_of(item.get("osc")))
+        self.osc.setPlaceholderText("/address")
+        form.addRow("OSC address", self.osc)
+        rng = item.get("range") or ["", ""]
+        self.lo, self.hi = QLineEdit(text_of(rng[0])), QLineEdit(text_of(rng[1]))
+        self.lo.setPlaceholderText("profile default")
+        self.hi.setPlaceholderText("profile default")
+        form.addRow("Range bottom", self.lo)
+        form.addRow("Range top", self.hi)
+        self.cmd = QLineEdit(text_of(item.get("cmd")))
+        self.cmd.setPlaceholderText("{v} = the fader, 0-100")
+        form.addRow("Command", self.cmd)
+        self.extra = {k: v for k, v in item.items() if k not in ("exec", "osc", "range", "cmd")}
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        form.addRow(bb)
+
+    def result_item(self):
+        k = self.kind.currentData()
+        a = dict(self.extra)
+        if k == "exec":
+            a["exec"] = self.exec_no.value()
+        elif k == "osc":
+            a["osc"] = self.osc.text().strip() or "/"
+            if self.lo.text().strip() and self.hi.text().strip():
+                a["range"] = [num_or_text(self.lo.text()), num_or_text(self.hi.text())]
+        elif k == "cmd":
+            a["cmd"] = self.cmd.text().strip()
+        return a
+
+
+def describe_fader(item):
+    if not item:
+        return "-"
+    if "exec" in item:
+        return f"Exec {item['exec']}"
+    if "osc" in item:
+        return f"OSC {item['osc']}"
+    if "cmd" in item:
+        return item.get("label") or f"Cmd {item['cmd']}"
+    return "-"
+
+
+class MidiPage(QWidget):
+    """MIDI controllers: which ones this profile uses, and what each control does."""
+
+    def __init__(self, screens_fn):
+        super().__init__()
+        import lxmidi
+        self.midi = lxmidi
+        self.screens_fn = screens_fn
+        self.entries = []
+        lay = QVBoxLayout(self)
+        lay.addWidget(note("MIDI controllers plugged into this computer. A known device works as soon as it's "
+                           "plugged in, with its own default layout; add it here to change what its pads, "
+                           "buttons and faders do (the same choices as the controller's keys and faders) "
+                           "or to switch it off. Your own devices: a definition file in the profiles "
+                           "folder's 'midi' folder."))
+        top = QHBoxLayout()
+        self.list = QListWidget()
+        self.list.setMaximumHeight(110)
+        self.list.currentRowChanged.connect(self.show_device)
+        top.addWidget(self.list, 1)
+        col = QVBoxLayout()
+        self.add_kind = QComboBox()
+        col.addWidget(self.add_kind)
+        add = QPushButton("Add")
+        add.clicked.connect(self.add)
+        col.addWidget(add)
+        rem = QPushButton("Remove")
+        rem.clicked.connect(self.remove)
+        col.addWidget(rem)
+        col.addStretch()
+        top.addLayout(col)
+        lay.addLayout(top)
+        self.enabled = QCheckBox("Use this device")
+        self.enabled.toggled.connect(self.toggle_enabled)
+        lay.addWidget(self.enabled)
+        self.about = note("")
+        self.about.setStyleSheet("color: gray")
+        lay.addWidget(self.about)
+        self.body = QVBoxLayout()
+        lay.addLayout(self.body)
+        reset = QPushButton("Back to this device's default layout")
+        reset.clicked.connect(self.reset)
+        self.reset_btn = reset
+        lay.addWidget(reset, 0, Qt.AlignLeft)
+        lay.addStretch()
+        self.defs = {}
+
+    def load_defs(self):
+        self.defs = self.midi.load_definitions(os.path.join(lx.PROFILE_DIR, "midi"))
+        self.add_kind.clear()
+        self.add_kind.addItems(sorted(self.defs))
+
+    def load(self, p):
+        self.load_defs()
+        self.entries = copy.deepcopy([e for e in (p.get("midi") or []) if isinstance(e, dict)])
+        self.refresh_list()
+
+    def collect(self, p):
+        if self.entries:
+            p["midi"] = copy.deepcopy(self.entries)
+        else:
+            p.pop("midi", None)
+
+    def refresh_list(self, sel=0):
+        self.list.blockSignals(True)
+        self.list.clear()
+        for e in self.entries:
+            self.list.addItem(e.get("device", "?") + ("" if e.get("enabled", True) else "  (off)"))
+        self.list.blockSignals(False)
+        if self.entries:
+            self.list.setCurrentRow(min(sel, len(self.entries) - 1))
+        self.show_device(self.list.currentRow())
+
+    def current(self):
+        r = self.list.currentRow()
+        return (r, self.entries[r]) if 0 <= r < len(self.entries) else (r, None)
+
+    def add(self):
+        name = self.add_kind.currentText()
+        if name:
+            self.entries.append({"device": name})
+            self.refresh_list(len(self.entries) - 1)
+
+    def remove(self):
+        r, e = self.current()
+        if e is not None:
+            del self.entries[r]
+            self.refresh_list(r)
+
+    def toggle_enabled(self, on):
+        r, e = self.current()
+        if e is None:
+            return
+        if on:
+            e.pop("enabled", None)
+        else:
+            e["enabled"] = False
+        self.list.item(r).setText(e.get("device", "?") + ("" if on else "  (off)"))
+
+    def reset(self):
+        r, e = self.current()
+        if e is not None:
+            e.pop("map", None)
+            self.show_device(r)
+
+    def items(self, e, spec, group):
+        m = (e.get("map") or {}).get(group)
+        if m is None:
+            m = (spec.get("map") or {}).get(group) or []
+        n = len(next(c for c in spec["controls"] if c["group"] == group).get("numbers", []))
+        return (copy.deepcopy(m) + [{}] * n)[:n]
+
+    def set_item(self, group, i, item):
+        r, e = self.current()
+        spec = self.defs.get(e.get("device"))
+        items = self.items(e, spec, group)
+        items[i] = item or {}
+        e.setdefault("map", {})[group] = items
+        self.show_device(r)
+
+    def show_device(self, r):
+        while self.body.count():
+            w = self.body.takeAt(0).widget()
+            if w:
+                w.setParent(None)  # gone now, not at the next event loop turn
+                w.deleteLater()
+        _, e = self.current()
+        self.enabled.setVisible(e is not None)
+        self.reset_btn.setVisible(e is not None)
+        if e is None:
+            self.about.setText("No devices in this profile: any known device that's plugged in uses its "
+                               "default layout.")
+            return
+        self.enabled.blockSignals(True)
+        self.enabled.setChecked(e.get("enabled", True))
+        self.enabled.blockSignals(False)
+        spec = self.defs.get(e.get("device"))
+        if not spec:
+            self.about.setText(f"No definition for '{e.get('device')}' on this computer.")
+            return
+        self.about.setText(spec.get("about", ""))
+        for c in spec["controls"]:
+            box = QGroupBox(c.get("label", c["group"]) + "s" if len(c.get("numbers", [])) > 1
+                            else c.get("label", c["group"]))
+            grid = QGridLayout(box)
+            items = self.items(e, spec, c["group"])
+            fader = c.get("type") == "fader"
+            rows, cols, banks = int(c.get("rows", 1)), int(c.get("cols", len(items))), int(c.get("banks", 1))
+            if rows * cols * banks < len(items):
+                rows, cols, banks = 1, len(items), 1
+            for i, it in enumerate(items):
+                bank, k = divmod(i, rows * cols)
+                row, col = divmod(k, cols)
+                text = describe_fader(it) if fader else describe(it)
+                b = QPushButton(f"{i + 1}\n" + (text.replace("Exec ", "") if banks > 1 else text))
+                b.setMinimumSize(48 if banks > 1 else 70, 44)
+                b.clicked.connect(lambda _=False, g=c["group"], i=i, f=fader: self.edit(g, i, f))
+                # bottom row at the bottom (as on the device); banks side by side
+                grid.addWidget(b, rows - 1 - row, bank * (cols + 1) + col)
+            for bank in range(1, banks):  # a gap between banks
+                grid.setColumnMinimumWidth(bank * (cols + 1) - 1, 14)
+            self.body.addWidget(box)
+
+    def edit(self, group, i, fader):
+        r, e = self.current()
+        spec = self.defs.get(e.get("device"))
+        cur = self.items(e, spec, group)[i]
+        if fader:
+            d = FaderDialog(self, cur)
+            if d.exec() == QDialog.Accepted:
+                self.set_item(group, i, d.result_item())
+        else:
+            new = edit_action(self, cur, False, self.screens_fn())
+            if new is not cur:
+                self.set_item(group, i, new)
+
+
 class Builder(QWidget):
     """Edit a profile. save(activate) is wired by the app."""
 
@@ -1020,9 +1272,11 @@ class Builder(QWidget):
         self.screens = ScreensPage(screens)
         self.look = LookPage()
         self.feedback = FeedbackPage()
+        self.midi = MidiPage(screens)
         self.sections = [("Connection", self.connection), ("Faders", self.faders), ("Keys", self.keys),
                          ("Screen buttons", self.buttons), ("Encoders", self.encoders),
-                         ("Screens", self.screens), ("Look", self.look), ("Feedback", self.feedback)]
+                         ("Screens", self.screens), ("Look", self.look), ("Feedback", self.feedback),
+                         ("MIDI", self.midi)]
         for title, w in self.sections:
             sc = QScrollArea()
             sc.setWidgetResizable(True)

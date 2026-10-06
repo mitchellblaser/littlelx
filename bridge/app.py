@@ -141,6 +141,7 @@ class Runner:
             lx.apply_profile(self.cfg, prof)
             self.bridge.open_osc()
             self.bridge.build_maps()
+            self.bridge.midi.reload()  # the new profile's MIDI layouts
             lx.save_active(self.cfg, self.bridge.ser, keep=True)
             if self.bridge.pi_ready:
                 self.bridge.screen.set_screen("main")
@@ -173,6 +174,9 @@ class Runner:
             print("Fader calibration saved.")
         self.bridge.call(do)
         return problems
+
+    def devices(self):
+        return self.bridge.devices()
 
     def installed(self):
         """Firmware versions of what's connected now (None: not connected)."""
@@ -248,8 +252,9 @@ class Runner:
                 err = "The bridge didn't let go of the controller."
             else:
                 try:
-                    LOG.part = "touchscreen"
-                    lx.update_pi(self.cfg, path, progress=lambda p: setattr(LOG, "progress", p))
+                    if LOG:
+                        LOG.part = "touchscreen"
+                    lx.update_pi(self.cfg, path, progress=lambda p: LOG and setattr(LOG, "progress", p))
                 except SystemExit as e:
                     err = str(e) if e.code not in (None, 0) else None
                 except Exception as e:
@@ -288,7 +293,7 @@ class StatusTab(QWidget):
         big = QFont()
         big.setPointSize(big.pointSize() + 2)
         self.labels = {}
-        for k, name in (("version", "Bridge"), ("controller", "Controller"), ("touchscreen", "Touchscreen"),
+        for k, name in (("version", "Bridge"), ("devices", "Hardware"),
                         ("profile", "Profile"), ("target", "Sends to"), ("link", "Link"), ("page", "Page")):
             lab = QLabel()
             lab.setFont(big)
@@ -301,10 +306,18 @@ class StatusTab(QWidget):
         s = self.runner.status()
         ok = lambda t: f"<span style='color:#2a9d4a'>{t}</span>"  # noqa: E731
         bad = lambda t: f"<span style='color:#c0392b'>{t}</span>"  # noqa: E731
-        self.labels["controller"].setText(ok(f"connected ({s['controller']})") if s["controller"]
-                                          else bad("not connected"))
-        self.labels["touchscreen"].setText(ok(f"connected, firmware {s['touchscreen']}") if s["touchscreen"]
-                                           else bad("not found"))
+        lines = []
+        for d in self.runner.devices():
+            if d["kind"] == "midi":
+                text = (f"MIDI: {d['name']} " + ("<span style='color:gray'>(no definition: not used)</span>"
+                                                  if d.get("unknown") else ok("connected")))
+            elif d["connected"]:
+                extra = ", ".join(x for x in (d.get("port"), d.get("firmware") and f"firmware {d['firmware']}") if x)
+                text = f"{d['name']}: " + ok("connected") + (f" ({extra})" if extra else "")
+            else:
+                text = f"{d['name']}: " + bad("not connected" if d["kind"] == "controller" else "not found")
+            lines.append(text)
+        self.labels["devices"].setText("<br>".join(lines))
         self.labels["profile"].setText(s["profile"])
         self.labels["target"].setText(s["target"])
         if s["generic"]:
@@ -481,7 +494,7 @@ class FirmwareTab(QWidget):
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.table.verticalHeader().setVisible(False)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
-        self.table.setMaximumHeight(110)
+        self.table.setMaximumHeight(200)
         b.addWidget(self.table)
         row = QHBoxLayout()
         self.install_btn = QPushButton("Install")
@@ -560,6 +573,13 @@ class FirmwareTab(QWidget):
                 inst_text = inst or ("not connected" if part == "touchscreen" else "-")
             for c, t in enumerate((fwpack.NAMES[part], inst_text, new or "-", action)):
                 self.table.setItem(r, c, QTableWidgetItem(t))
+        others = [d for d in self.runner.devices() if d["kind"] == "midi"]
+        self.last_others = [d["port"] for d in others]
+        self.table.setRowCount(len(rows) + len(others))
+        for r, d in enumerate(others, len(rows)):
+            what = "MIDI device: no definition" if d.get("unknown") else "MIDI device"
+            for c, t in enumerate((d["name"], what, "-", "nothing to install")):
+                self.table.setItem(r, c, QTableWidgetItem(t))
         todo = [r for r in rows if r[3] == "install"]
         busy = self.runner.updating
         self.install_btn.setEnabled(bool(self.pkg) and bool(todo) and not busy and have.get("main") is not None)
@@ -573,7 +593,8 @@ class FirmwareTab(QWidget):
             part = getattr(self.log, "part", None)
             self.msg.setText({"main": "Installing: controller...", "touchscreen": "Installing: touchscreen..."}
                              .get(part, "Installing..."))
-        elif self.runner.installed() != self.last_have:
+        elif (self.runner.installed() != self.last_have or
+              [d["port"] for d in self.runner.devices() if d["kind"] == "midi"] != getattr(self, "last_others", [])):
             self.show_plan()
 
     def install_file(self):
@@ -804,7 +825,7 @@ class Tray(QSystemTrayIcon):
         super().__init__(make_icon(dark=sys.platform == "darwin"))
         self.runner, self.window = runner, window
         self.menu = QMenu()
-        self.lines = [self.menu.addAction("") for _ in range(3)]
+        self.lines = [self.menu.addAction("") for _ in range(4)]
         for a in self.lines:
             a.setEnabled(False)
         self.menu.addSeparator()
@@ -849,6 +870,8 @@ class Tray(QSystemTrayIcon):
             ("MA3 linked" if s["ma"] else "MA3 not answering")
         texts = [f"Controller: {'connected' if s['controller'] else 'not connected'}",
                  f"Touchscreen: {'connected' if s['touchscreen'] else 'not found'}",
+                 "MIDI: " + (", ".join(d["name"] for d in self.runner.devices()
+                                      if d["kind"] == "midi" and not d.get("unknown")) or "none"),
                  f"{s['profile']}: {link}"]
         for a, t in zip(self.lines, texts):
             a.setText(t)

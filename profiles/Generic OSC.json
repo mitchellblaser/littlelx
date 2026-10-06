@@ -179,19 +179,6 @@
       "screen": "encoders"
     }
   ],
-  "encoder_attributes": [
-    "Dimmer",
-    "Pan",
-    "Tilt",
-    "Zoom",
-    "Focus1",
-    "Iris",
-    "Shutter1",
-    "Gobo1",
-    "Color1",
-    "Prism1",
-    "Frost1"
-  ],
   "pickup": true,
   "screen": {
     "left": "{profile}",

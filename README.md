@@ -219,14 +219,16 @@ bar** (macOS) and runs the bridge in the background - no terminal window. Its
 menu shows whether the controller, touchscreen and MA (or your OSC target) are
 there, switches profiles, and opens the littlelx window:
 
-* **Status** - controller, touchscreen, profile, where it sends to, the link.
+* **Status** - the hardware (controller, touchscreen, MIDI devices; modules
+  later), the profile, where it sends to, the link.
 * **Profiles** - make one active (it's stored on the controller too), edit in
   the Builder, new, duplicate, rename, delete, import / export, open the folder,
   and **Restore examples** (writes the shipped example profiles again - e.g.
   after an update brings newer ones; missing examples are added by themselves).
 * **Builder** - edit a profile with forms: connection, faders, the 20 keys
   (laid out like the controller), the touchscreen's buttons, encoders, your own
-  screens and keypad, the look (top bar, colours) and feedback. The JSON tab
+  screens and keypad, the look (top bar, colours), feedback and MIDI devices.
+  The JSON tab
   shows the whole file for anything else. **Open** picks any profile to edit,
   **Save as copy** saves it under a new name, **Save & make active** uses it
   straight away.
@@ -235,7 +237,8 @@ there, switches profiles, and opens the littlelx window:
   own version; Install shows what's installed and updates only what's out of
   date, the controller first (the touchscreen is updated through it). **Install
   from file** takes another `.lxfw`; single parts (a Mega .hex, a touchscreen
-  .zip) are under Advanced. Modules will join the same package.
+  .zip) are under Advanced. Modules will join the same package. MIDI devices
+  are listed too (they have no firmware to install).
 * **Calibration** - fader bottom / top (live readings) and the touchscreen.
 * **Log** - what the bridge reports (also in `littlelx.log` in your home folder).
 
@@ -249,7 +252,7 @@ System Settings > Privacy & Security and click "Open Anyway". If macOS calls it
 "damaged", run `xattr -cr littlelx.app` in Terminal (in the folder it's in) and
 open it again. From the source:
 
-    pip install pyside6 pyserial
+    pip install pyside6 pyserial python-rtmidi
     python3 bridge/app.py
 
 The command-line bridge (`littlelx.py`) still works on its own; don't run both
@@ -333,6 +336,10 @@ on the controller.
                      "color": "1f7a3a", "lit_color": "c03030", "text_color": "ffffff"},
                     {"label": "Keypad", "screen": "keypad"}, ...],
   "keypad": [["Fixture", "7", "8", "9", "Thru"], ...],                     // 5 rows of 5
+  "midi": [                     // MIDI controllers (see "MIDI controllers" below)
+    {"device": "APC Mini", "map": {"pads": [{"exec": 101}, ...], "faders": [{"exec": 201}, ...]}},
+    {"device": "Midi Fighter Spectra", "enabled": false}
+  ],
   "screens": {                  // your own screens; open one with {"screen": "name"}
     "effects": {"title": "Effects", "columns": 2, "back": "main",
                 "buttons": [{"label": "Strobe", "osc": "/fx/strobe", "lit": "/fx/strobe/on"}, ...]},
@@ -379,7 +386,8 @@ Actions (keys, touchscreen buttons, keypad keys, encoder pushes): `{"exec": 201}
 (executor button), `{"key": "Store"}` (command-line key), `{"cmd": "Go+"}`
 (command right away; generic: to the command address), `{"page": 1}`,
 `{"screen": "keypad"}` (any screen, also your own), `{"resolution": "Dimmer"}`,
-`{"cmdline": "please" | "clear" | "backspace"}` (keypad special keys), and
+`{"cmdline": "please" | "clear" | "backspace"}` (keypad special keys),
+`{"goto_page": 3}`, and
 `{"osc": "/any/address"}` (sends 1 on press, 0 on release, or the item's own
 `"on"` / `"off"` - with any connection). Keypad keys that are plain text are
 typed into the command line.
@@ -393,6 +401,37 @@ there. In a `generic` profile, keys and buttons without their own `"osc"` send
 to the `generic` addresses (Page and screen buttons still work locally).
 Colours: fader colours come from feedback, then MA's sequence colour, then the
 profile's `"color"`.
+
+## MIDI controllers
+
+MIDI controllers plugged into the computer work alongside the littlelx
+controller (or on their own: the bridge doesn't need the controller plugged in
+for them). Known now: **Akai APC Mini** (first version), **APC mini mk2** and
+**DJ TechTools Midi Fighter Spectra**. Plug one in and it works with its
+default layout:
+
+* **APC Mini / mk2** - pads, bottom row up: executors 101-108, 201-208,
+  301-308, 401-408 (the top four rows are free). Track buttons: Page -, Page +,
+  Clear, Oops, Please, Highlight, Blind, Store. Scene buttons: pages 1-8. Faders
+  1-8: executors 201-208, fader 9: grand master. Pads light like MA: off when
+  the executor is empty; on the mk2 dim in the sequence's colour and bright
+  while it runs; on the first APC Mini in the nearest of its colours, blinking
+  while it runs.
+* **Midi Fighter Spectra** - bank 1 = executors 1-4 (rows from the bottom:
+  101-104, 201-204, 301-304, 401-404), bank 2 = 5-8, bank 3 = 9-12, bank 4 =
+  13-15. A button lights in its sequence's colour while it runs.
+
+Change what a device does in the Builder's **MIDI** tab (or a profile's
+`"midi"`): its pads and buttons take the same actions as the controller's keys,
+its faders the same settings as the controller's faders (an executor, an OSC
+address with a range, or a command like `Master 2.1 At {v}`), with the same
+pickup. A device can be switched off for a profile. MA reports the executors
+the profile and its MIDI layouts use, so their lights follow MA.
+
+Other devices: write a definition (copy one from `midi/` in the repo into
+`littlelx-profiles/midi/`): which notes / CCs it sends, how its lights are set
+(palette of velocities and colours, channels for dim / bright, blink) and its
+default layout. `littlelx.py --midi` lists what the bridge knows and finds.
 
 ## Default layout (all of it is in the active profile, below)
 

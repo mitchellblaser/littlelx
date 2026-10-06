@@ -36,6 +36,10 @@ import zlib
 import threading
 import time
 
+if os.path.dirname(os.path.abspath(__file__)) not in sys.path:  # loaded from elsewhere (tests)
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import lxmidi  # noqa: E402
+
 try:
     import serial
     import serial.tools.list_ports
@@ -78,7 +82,7 @@ def bridge_version():
 #   {"cmd": "... {d} ..."}               {d} = step per click, or {"page": 1}
 # Push actions also allow {"resolution": "Dimmer"}: toggle MA's Coarse/Fine.
 
-CONFIG_VERSION = 9
+CONFIG_VERSION = 10
 
 DEFAULTS = {
     "config_version": CONFIG_VERSION,
@@ -139,9 +143,6 @@ DEFAULTS = {
         {"label": "Keypad", "screen": "keypad"},
         {"label": "Encoders", "screen": "encoders"},
     ],
-    # Choices on the touchscreen's Encoders page (MA3 attribute names)
-    "encoder_attributes": ["Dimmer", "Pan", "Tilt", "Zoom", "Focus1", "Iris",
-                           "Shutter1", "Gobo1", "Color1", "Prism1", "Frost1"],
     # Filled in by --learn
     "hw": {
         "faders": [None] * 5,      # {"ch": 0..15, "lo": 0, "hi": 1023}
@@ -182,6 +183,7 @@ def load_config():
 
 def migrate(cfg):
     """Bring a config saved by an older version up to date (runs once)."""
+    cfg.pop("encoder_attributes", None)  # the encoders follow MA's now
     labels = [b.get("label") for b in cfg.get("touch_buttons", [])]
     old_defaults = (["Page -", "Page +", "Clear", "Oops", "Keypad", "Go -", "Pause", "Go +",
                      "Highlight", "Blind", "Last", "Next"],
@@ -233,7 +235,9 @@ def migrate(cfg):
 #                 "listen_port", "fader_type", "generic": {addresses}},
 #  "faders": [{"exec": 201, "name": "", "osc": "/addr" (generic)}, ...5],
 #  "keys": [20 actions], "encoders": [2], "touch_buttons": [main page],
-#  "keypad": [5 rows of 5 labels] (optional), "encoder_attributes": [...]}
+#  "keypad": [5 rows of 5 labels] (optional),
+#  "midi": [{"device": "APC Mini", "map": {"pads": [actions], "faders": [faders]}}]
+#          (MIDI controllers: see bridge/lxmidi.py; same actions / faders as above)}
 #
 # Actions: see the top of this file; also {"osc": "/addr"} sends 1 / 0.
 # The active one is also stored on the controller (setup_blob).
@@ -241,8 +245,8 @@ def migrate(cfg):
 PROFILE_DIR = os.path.join(os.path.expanduser("~"), "littlelx-profiles")
 CONN_KEYS = ("type", "host", "port", "prefix", "listen_port", "fader_type", "generic", "values",
              "fader_interval", "fader_jump")
-PROFILE_FIELDS = ("faders", "keys", "encoders", "touch_buttons", "keypad", "encoder_attributes", "pickup",
-                  "screen", "feedback", "screens")
+PROFILE_FIELDS = ("faders", "keys", "encoders", "touch_buttons", "keypad", "pickup",
+                  "screen", "feedback", "screens", "midi")
 
 # What the touchscreen shows, per connection type; a profile's "screen" overrides
 # any of it. Texts may use {page} and {profile}.
@@ -648,9 +652,11 @@ class Port:
             pass
 
 
-def connect(cfg, verbose=True, stop=None):
+def connect(cfg, verbose=True, stop=None, idle=None):
     """Open the Mega and wait for it to boot (opening the port resets it).
-    stop: returns True to give up (-> None), e.g. the app pausing the bridge."""
+    stop: returns True to give up (-> None), e.g. the app pausing the bridge.
+    idle(kind, src, data): gets the other events meanwhile (and None ones
+    regularly), so MIDI devices and MA keep working without the controller."""
     while True:
         if stop and stop():
             return None
@@ -661,11 +667,13 @@ def connect(cfg, verbose=True, stop=None):
                 start, asked = time.time(), False
                 while time.time() - start < 4:
                     try:
-                        kind, src, line = events.get(timeout=0.2)
+                        kind, src, line = events.get(timeout=0.02 if idle else 0.2)
                     except queue.Empty:
-                        kind = None
+                        kind = src = line = None
                     if kind == "call":
                         line()  # the app's request (see Bridge.call)
+                    elif idle and kind != "mega":
+                        idle(kind, src, line)
                     if kind == "mega" and src is p and line.startswith("HELLO littlelx-mega"):
                         parts = line.split()
                         p.mega_version = parts[3] if len(parts) > 3 else "old"  # before versions
@@ -686,11 +694,13 @@ def connect(cfg, verbose=True, stop=None):
         end = time.time() + 2
         while time.time() < end and not (stop and stop()):
             try:
-                kind, src, data = events.get(timeout=0.2)
+                kind, src, data = events.get(timeout=0.02 if idle else 0.2)
             except queue.Empty:
-                continue
+                kind = src = data = None
             if kind == "call":
                 data()
+            elif idle:
+                idle(kind, src, data)
 
 
 # ------------------------------------------------- setup stored on the Mega
@@ -779,7 +789,15 @@ def setup_blob(cfg):
 
 
 def save_to_mega(cfg, ser, keep=False):
-    data = zlib.compress(json.dumps(setup_blob(cfg), separators=(",", ":")).encode(), 9)
+    blob = setup_blob(cfg)
+    pack = lambda b: zlib.compress(json.dumps(b, separators=(",", ":")).encode(), 9)  # noqa: E731
+    data = pack(blob)
+    if len(data) > EE_SIZE - EE_BLOB - 8 and blob["profile"].get("midi"):
+        # MIDI devices plug into this computer anyway: their layouts can stay here
+        blob["profile"].pop("midi")
+        blob["profile"]["midi_here"] = True
+        data = pack(blob)
+        print("(The profile's MIDI layouts are too big for the controller: kept on this computer.)")
     if len(data) > EE_SIZE - EE_BLOB - 8:
         print("Setup too big for the controller's memory; kept on this computer only.")
         return
@@ -824,6 +842,15 @@ def sync_setup(cfg, ser):
             changed = True
             print("Loaded the learned setup from the controller.")
         prof = blob.get("profile")
+        if prof and prof.pop("midi_here", False):  # its MIDI layouts stayed on the computer
+            here = cfg.get("midi") if prof.get("name") == cfg.get("profile") else None
+            if here is None:
+                try:
+                    here = load_profile(prof.get("name", "")).get("midi")
+                except (OSError, ValueError):
+                    here = None
+            if here:
+                prof["midi"] = here
         if prof and prof != profile_from_cfg(cfg):
             apply_profile(cfg, prof)
             changed = True
@@ -2055,6 +2082,8 @@ class Bridge:
         self.hold = threading.Event()        # the app wants the port (set) ...
         self.held = threading.Event()        # ... and has it (set by run)
         self.quit = threading.Event()
+        self.started = time.time()
+        self.midi = lxmidi.Midi(self, user_dir=os.path.join(PROFILE_DIR, "midi"))
         self.build_maps()
 
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -2137,12 +2166,14 @@ class Bridge:
                 on = val > 0 if isinstance(val, (int, float)) else str(val).lower() in ("1", "on", "true", "yes")
                 self.fb["lit"][fixed] = on
                 self.fb["seen"] = time.time()
+                self.midi.dirty = True
                 if self.pi_ready:
                     self.screen.update_buttons()
                 return True
             n = fixed or (int(m.group(1)) if m.groups() else None)
             val = args[0] if args else None
             self.fb["seen"] = time.time()
+            self.midi.dirty = True
             scr = self.screen if self.pi_ready else None
             if kind == "fader" and n and isinstance(val, (int, float)):
                 f = self.cfg["faders"][n - 1] if n - 1 < len(self.cfg["faders"]) else {}
@@ -2442,13 +2473,25 @@ class Bridge:
             self.ma_plugin("show " + self.screen.cmdline.strip())
 
     def ma_code_version(self):
-        """Short fingerprint of the MA code this bridge would install."""
+        """Short fingerprint of the MA code this bridge would install, and of the
+        executors it reports (a new MIDI mapping restarts it with the new ones)."""
         if not hasattr(self, "_ma_ver"):
             try:
                 self._ma_ver = f"{zlib.crc32(open(resource('ma3', 'littlelx.lua'), 'rb').read()):08x}"
             except OSError:
                 self._ma_ver = ""
-        return self._ma_ver
+        return f"{self._ma_ver}-{zlib.crc32(self.watch_spec().encode()) & 0xffff:04x}"
+
+    def watch_spec(self):
+        """The executors MA reports (names, colours, running, fader levels):
+        101-115 and 201-215, and whatever the profile and MIDI devices use."""
+        nums = set(range(101, 116)) | set(range(201, 216))
+        for item in list(self.cfg.get("faders") or []) + list(self.cfg.get("keys") or []) \
+                + list(self.cfg.get("touch_buttons") or []):
+            if isinstance(item, dict) and isinstance(item.get("exec"), int):
+                nums.add(item["exec"])
+        nums |= self.midi.executors()
+        return lxmidi.ranges(n for n in nums if 0 < n < 10000)
 
     def install_ma3(self):
         """Put the littlelx code into MA3 over OSC and start it (no import needed)."""
@@ -2465,10 +2508,10 @@ class Bridge:
         pieces = [h[off:off + 240] for off in range(0, len(h), 240)]
         attrs = ",".join(sorted({e["attribute"] for e in self.cfg["encoders"] if e and e.get("attribute")}
                                 | {e["push"]["resolution"] for e in self.cfg["encoders"]
-                                   if e and isinstance(e.get("push"), dict) and "resolution" in e["push"]}
-                                | set(self.cfg.get("encoder_attributes", [])))) or "Dimmer"
+                                   if e and isinstance(e.get("push"), dict) and "resolution" in e["push"]})) or "Dimmer"
         attrs = re.sub(r"[^A-Za-z0-9,_]", "", attrs)
-        start = 'Lua "' + self.MA_RUN.replace("{arg}", f"__start {line} {tick} {attrs} {self.ma_code_version()}") + '"'
+        start = 'Lua "' + self.MA_RUN.replace(
+            "{arg}", f"__start {line} {tick} {attrs} {self.ma_code_version()} {self.watch_spec()}") + '"'
 
         def send_all():  # spaced out for MA, on its own thread so faders never wait
             for i, piece in enumerate(pieces, 1):
@@ -2541,7 +2584,7 @@ class Bridge:
         if not down and i not in self.keys_down:
             return  # its press went to Setup: MA never saw it
         act = self.cfg["keys"][i] if i < len(self.cfg["keys"]) else None
-        local = ("osc", "page", "screen", "encpage")  # its own address, or the controller's own pages/screens
+        local = ("osc", "page", "goto_page", "screen", "encpage")  # its own address, or the controller's own pages/screens
         if self.generic() and not (act and any(k in act for k in local)):
             self.keys_down.add(i) if down else self.keys_down.discard(i)
             self.generic_send("key", i + 1, self.onoff("key", down))
@@ -2587,10 +2630,53 @@ class Bridge:
             self.ma_cmd(act["cmd"])
         elif "page" in act:
             self.set_page(self.page + int(act["page"]))
+        elif "goto_page" in act:
+            self.set_page(int(act["goto_page"]))
         elif "screen" in act:
             self.screen.set_screen(act["screen"] if self.screen.name != act["screen"] else "main")
         elif "encpage" in act:
             self.next_enc_page()
+
+    def send_item_fader(self, item, value):
+        """A fader that isn't one of the controller's own (MIDI, later modules),
+        set up like them: {"exec": 201} | {"osc": "/addr", "range": [0, 1]} |
+        {"cmd": "Master 2.1 At {v}"}; value 0..100."""
+        if item.get("osc"):
+            self.osc_raw(item["osc"], self.fader_value(value, item.get("range")))
+        elif "cmd" in item:
+            self.ma_cmd_quiet(str(item["cmd"]).replace("{v}", str(round(value))))
+        elif "exec" in item and not self.generic():
+            addr, arg = fader_message(self.cfg["osc"].get("fader_type", "i"), self.page, item["exec"], value)
+            self.osc(addr, arg)
+
+    def ma_cmd_quiet(self, cmd):
+        """A command from a moving fader: not echoed to the log and screen."""
+        if self.generic():
+            self.generic_send("command", 0, cmd)
+        else:
+            self.osc("/cmd", cmd)
+
+    def item_state(self, act):
+        """For lights (MIDI devices): -> ("off" | "idle" | "on", sequence colour or None).
+        idle = something is assigned; on = it runs / is active."""
+        if not act:
+            return "off", None
+        ma = self.ma
+        if act.get("lit") in self.fb["lit"]:
+            return ("on" if self.fb["lit"][act["lit"]] else "idle"), act.get("color")
+        if "exec" in act and not self.generic():
+            ex = act["exec"]
+            if not self.ma_linked():
+                return "idle", None
+            color = ma["color"].get(ex) or None
+            if not ma["name"].get(ex) and not ma["run"].get(ex):
+                return "off", None  # no sequence there
+            return ("on" if ma["run"].get(ex) else "idle"), color
+        if "state" in act:
+            return ("on" if ma["master"].get(str(act["state"]).lower()) else "idle"), act.get("color")
+        if "goto_page" in act:
+            return ("on" if self.page == int(act["goto_page"]) else "idle"), act.get("color")
+        return "idle", act.get("color")
 
     def set_page(self, page, from_ma=False):
         page = max(1, page)
@@ -2606,6 +2692,7 @@ class Bridge:
         self.ma["fader"], self.ma["run"], self.ma["name"], self.ma["color"] = {}, {}, {}, {}
         for i in range(5):  # new page: catch each fader again before it takes over
             self.picked[i] = not self.cfg.get("pickup", True)
+        self.midi.page_changed()
         if self.pi_ready:
             self.screen.update_header()
             self.screen.update_buttons()
@@ -2833,6 +2920,8 @@ class Bridge:
             # ask for everything (names, colours...) once
             self.ma_plugin("resync")
         scr = self.screen if self.pi_ready else None
+        if what.startswith(("run/", "name/", "color/", "master/", "fader/")):
+            self.midi.dirty = True  # MIDI lights follow
         if what == "page" and isinstance(val, int):
             self.set_page(val, from_ma=True)
         elif what.startswith(("fader/", "run/", "name/", "color/")):
@@ -2953,16 +3042,54 @@ class Bridge:
         """Run fn on the bridge's thread (from the app's): safe with the port."""
         events.put(("call", None, fn))
 
+    def devices(self):
+        """Everything plugged in, for the app: the controller, its touchscreen,
+        (later) its modules, and MIDI devices. Safe from another thread."""
+        ser = self.ser
+        rows = [
+            {"kind": "controller", "part": "main", "name": "Controller (main module)",
+             "connected": bool(ser), "port": getattr(ser, "path", None) if ser else None,
+             "firmware": self.mega_version if ser else None},
+            {"kind": "touchscreen", "part": "touchscreen", "name": "Touchscreen",
+             "connected": bool(ser and self.pi_ready), "port": None,
+             "firmware": self.pi_version if ser and self.pi_ready else None},
+        ]
+        return rows + self.midi.status()
+
+    def post_midi(self, dev, msg):
+        """From a MIDI device's own thread: into the bridge's loop."""
+        events.put(("midi", dev, msg))
+
+    def idle(self, kind, src, data):
+        """While no controller is plugged in: MIDI devices and MA still work."""
+        if kind == "osc":
+            self.on_osc(*data)
+        elif kind == "midi":
+            self.midi.on_message(src, data)
+        self.background(time.time())
+
+    def background(self, now):
+        """Housekeeping with or without the controller."""
+        self.midi.tick(now)
+        if (self.cfg.get("ma3", {}).get("auto_install", True) and not self.generic()
+                and now - self.ma_installed_at > 30):
+            if not self.ma_linked() and now - self.started > 4:
+                self.install_ma3()
+            elif (self.ma_linked() and self.ma["ver"] != self.ma_code_version()
+                  and now - self.ma["linked_at"] > 5):  # older code (or another executor list) in MA
+                print("Updating the littlelx code in MA3...")
+                self.install_ma3()
+
     def run(self):
         last_ping = last_status = last_refresh = 0
-        started = time.time()
         while not self.quit.is_set():
             if self.hold.is_set():  # the app has the port (touchscreen update)
                 self.held.set()
                 time.sleep(0.2)
                 continue
             self.held.clear()
-            self.ser = connect(self.cfg, stop=lambda: self.hold.is_set() or self.quit.is_set())
+            self.ser = connect(self.cfg, stop=lambda: self.hold.is_set() or self.quit.is_set(),
+                               idle=self.idle)
             if self.ser is None:
                 continue
             self.last_port = self.ser.path
@@ -2996,6 +3123,8 @@ class Bridge:
                     kind = None
                 if kind == "call":
                     data()
+                elif kind == "midi":
+                    self.midi.on_message(src, data)
                 elif kind == "mega" and src is self.ser:
                     self.on_mega(data)
                 elif kind == "osc":
@@ -3009,14 +3138,7 @@ class Bridge:
                 now = time.time()
                 self.flush_faders()
                 self.check_encoder_clicks(now)
-                if (self.cfg.get("ma3", {}).get("auto_install", True) and not self.generic()
-                        and now - self.ma_installed_at > 30):
-                    if not self.ma_linked() and now - started > 4:
-                        self.install_ma3()
-                    elif (self.ma_linked() and self.ma["ver"] != self.ma_code_version()
-                          and now - self.ma["linked_at"] > 5):  # older code still running in MA
-                        print("Updating the littlelx code in MA3...")
-                        self.install_ma3()
+                self.background(now)
                 if self.ma["busy"] and now - self.ma["busy_at"] > 3:
                     self.ma["busy"] = ""
                     if self.pi_ready:
@@ -3418,6 +3540,20 @@ def flash_mega_cli(cfg, path):
         sys.exit(f"\nFlashing failed: {e}\nThe old firmware may be half-written: just flash again.")
 
 
+def show_midi():
+    defs = lxmidi.load_definitions(os.path.join(PROFILE_DIR, "midi"))
+    print("Known MIDI devices: " + (", ".join(sorted(defs)) or "none"))
+    b = lxmidi.Backend()
+    if not b.ok:
+        print(f"MIDI is off on this computer: {b.error}")
+        return
+    ins = b.inputs()
+    print("MIDI inputs found:" + ("" if ins else " none"))
+    for name in ins:
+        spec = next((s for s in defs.values() if lxmidi.matches(s, name)), None)
+        print(f"  {name}  ->  {spec['name'] if spec else 'not known (no definition)'}")
+
+
 def show_profiles(cfg):
     print(f"Profiles in {PROFILE_DIR}:")
     for name in list_profiles():
@@ -3741,6 +3877,7 @@ def main():
     ap.add_argument("--test-faders", action="store_true", help="find the fader format MA3 accepts")
     ap.add_argument("--ma-probe", action="store_true", help="show what MA's Lua offers (encoder diagnostics)")
     ap.add_argument("--profiles", action="store_true", help=f"list the profiles (files in {PROFILE_DIR})")
+    ap.add_argument("--midi", action="store_true", help="list the MIDI devices littlelx knows and finds")
     ap.add_argument("--install", metavar="FILE.lxfw", nargs="?", const="",
                     help="install the firmware package: controller, touchscreen (only what's out of date; "
                          "default: the one bundled with this build)")
@@ -3783,6 +3920,8 @@ def main():
             flash_mega_cli(cfg, args.flash_mega)
         elif args.profiles:
             show_profiles(cfg)
+        elif args.midi:
+            show_midi()
         elif args.use_profile:
             use_profile_cli(cfg, args.use_profile)
         else:

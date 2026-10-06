@@ -102,10 +102,10 @@ jobs:
           python-version: "3.12"
       - name: Build littlelx.exe (command line) and littlelx-app.exe (tray app)
         run: |
-          python -m pip install pyserial pyinstaller pyside6
+          python -m pip install pyserial pyinstaller pyside6 python-rtmidi
           git describe --always --dirty > VERSION
-          pyinstaller --onefile --console --name littlelx --paths bridge --hidden-import megaflash --hidden-import fwpack --add-data "ma3/littlelx.lua;ma3" --add-data "profiles;profiles" --add-data "firmware;firmware" --add-data "VERSION;." bridge/littlelx.py
-          pyinstaller --onefile --noconsole --name littlelx-app --paths bridge --hidden-import megaflash --hidden-import fwpack --add-data "ma3/littlelx.lua;ma3" --add-data "profiles;profiles" --add-data "firmware;firmware" --add-data "VERSION;." bridge/app.py
+          pyinstaller --onefile --console --name littlelx --paths bridge --hidden-import megaflash --hidden-import fwpack --hidden-import lxmidi --hidden-import rtmidi --add-data "ma3/littlelx.lua;ma3" --add-data "profiles;profiles" --add-data "midi;midi" --add-data "firmware;firmware" --add-data "VERSION;." bridge/littlelx.py
+          pyinstaller --onefile --noconsole --name littlelx-app --paths bridge --hidden-import megaflash --hidden-import fwpack --hidden-import lxmidi --hidden-import rtmidi --add-data "ma3/littlelx.lua;ma3" --add-data "profiles;profiles" --add-data "midi;midi" --add-data "firmware;firmware" --add-data "VERSION;." bridge/app.py
       - uses: actions/upload-artifact@v4
         with:
           name: littlelx-windows
@@ -129,9 +129,9 @@ jobs:
           python-version: "3.12"
       - name: Build littlelx.app (menu bar app)
         run: |
-          python -m pip install pyserial pyinstaller pyside6
+          python -m pip install pyserial pyinstaller pyside6 python-rtmidi
           git describe --always --dirty > VERSION
-          pyinstaller --windowed --name littlelx --paths bridge --hidden-import megaflash --hidden-import fwpack --add-data "ma3/littlelx.lua:ma3" --add-data "profiles:profiles" --add-data "firmware:firmware" --add-data "VERSION:." bridge/app.py
+          pyinstaller --windowed --name littlelx --paths bridge --hidden-import megaflash --hidden-import fwpack --hidden-import lxmidi --hidden-import rtmidi --add-data "ma3/littlelx.lua:ma3" --add-data "profiles:profiles" --add-data "midi:midi" --add-data "firmware:firmware" --add-data "VERSION:." bridge/app.py
           # menu bar only: no Dock icon
           plutil -insert LSUIElement -bool true dist/littlelx.app/Contents/Info.plist
           # that edit breaks PyInstaller's signature, and macOS calls an app with a
