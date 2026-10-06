@@ -705,6 +705,7 @@ def res_label(f):
 
 C_PROG = "ff4b3e"  # programmer values: red, like MA
 C_VALUE = "a4acb8"  # values not in the programmer: grey, like MA
+C_STRIP = "161d28"  # main page: the encoder strip under the status bar
 FEATURE_COLORS = {  # encoder headers, by MA feature group
     "dimmer": "d8b020", "position": "3a7bd5", "gobo": "3aa655", "color": "b03ab8",
     "beam": "d07a2a", "focus": "2aa8a8", "control": "7a8590", "shapers": "b84848", "video": "5a5ac8",
@@ -718,7 +719,7 @@ class Screen:
     Every widget's current state is kept here, so the whole screen can be
     re-sent bit by bit in the background: anything lost on the serial link
     reappears within a few seconds."""
-    HDR_PAGE, HDR_MID, HDR_STATUS, HDR_SETUP = 0, 1, 2, 3
+    HDR_PAGE, HDR_MID, HDR_STATUS, HDR_SETUP, HDR_ENC1, HDR_ENC2 = 0, 1, 2, 3, 4, 5
     FADER0 = 10
     BTN0 = 20
     CMDLINE = 39
@@ -819,8 +820,11 @@ class Screen:
                 self.send(f"M {wid} {s['marker']}")
 
     # ---- layout
+    ENC_STRIP_H = 20  # main page: the two encoders, under the status bar
+
     def header_h(self):
-        return 54 if self.portrait else 30
+        strip = self.ENC_STRIP_H if self.name == "main" else 0
+        return (54 if self.portrait else 30) + strip
 
     def mid_text(self):
         b = self.b
@@ -832,9 +836,17 @@ class Screen:
     def header(self):
         w = self.w
         page = f"Page {self.b.page}"
+        strip = self.name == "main"
+        sy = 30  # the encoder strip sits right under the status bar
+        if strip:
+            half = w // 2
+            for k, wid in enumerate((self.HDR_ENC1, self.HDR_ENC2)):
+                self.widget(wid, "L", k * half, sy, half if k == 0 else w - half, self.ENC_STRIP_H, C_STRIP, C_VALUE,
+                            C_STRIP, 0, 1, 0, "")
+        cy = 30 + (self.ENC_STRIP_H if strip else 0)
         if self.portrait:
             self.widget(self.HDR_PAGE, "L", 0, 0, 100, 30, C_PANEL, C_TEXT, C_PANEL, 1, 1, 0, page)
-            self.widget(self.HDR_MID, "L", 0, 30, w, 24, C_PANEL, C_CMD, C_PANEL, 0, 1, 0, self.mid_text())
+            self.widget(self.HDR_MID, "L", 0, cy, w, 24, C_PANEL, C_CMD, C_PANEL, 0, 1, 0, self.mid_text())
             x = 100
         else:
             self.widget(self.HDR_PAGE, "L", 0, 0, 120, 30, C_PANEL, C_TEXT, C_PANEL, 1, 1, 0, page)
@@ -845,6 +857,22 @@ class Screen:
         self.widget(self.HDR_SETUP, "B", w - 76, 2, 72, 26, C_KEY2, C_TEXT, C_BTN_ON, 0, 0,
                     1 if self.in_setup() else 0, "Setup")
         self.update_header()
+        self.update_enc_strip()
+
+    def update_enc_strip(self):
+        """Main page: what the two encoders control and their values, small."""
+        if self.HDR_ENC1 not in self.state:
+            return
+        b = self.b
+        for i, wid in enumerate((self.HDR_ENC1, self.HDR_ENC2)):
+            if b.ma_encoders_on():
+                e = b.ma_encoder(i)
+                text = f" {i + 1}  {e['pretty']}  {e['value'] or '-'}" if e else f" {i + 1}  -"
+                fg = C_PROG if e and e["prog"] else C_VALUE
+            else:
+                what, _ = self.encoder_info(i)
+                text, fg = f" {i + 1}  {what}", C_VALUE
+            self.setw(wid, text=text[:26], colors=(C_STRIP, fg, C_STRIP))
 
     def update_header(self):
         b = self.b
@@ -1003,6 +1031,7 @@ class Screen:
                 self.setw(wid, value=0, text="", colors=(C_PANEL, C_DIM, C_PANEL))
 
     def update_encoders(self):
+        self.update_enc_strip()
         if self.name.startswith("entry"):  # typing a value: keep MA's current one fresh
             self.setw(self.SET_TITLE, text=self.value_title(int(self.name[5:])))
             return
