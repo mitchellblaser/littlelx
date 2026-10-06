@@ -1,0 +1,207 @@
+{
+  "name": "grandMA3",
+  "connection": {
+    "type": "ma3",
+    "host": "127.0.0.1",
+    "port": 8000,
+    "prefix": "/gma3",
+    "listen_port": 9000,
+    "fader_type": "i",
+    "generic": {
+      "fader": "/fader/{n}",
+      "key": "/key/{n}",
+      "encoder": "/encoder/{n}",
+      "push": "/encoder/{n}/push",
+      "button": "/button/{n}"
+    }
+  },
+  "faders": [
+    {
+      "exec": 201,
+      "name": ""
+    },
+    {
+      "exec": 202,
+      "name": ""
+    },
+    {
+      "exec": 203,
+      "name": ""
+    },
+    {
+      "exec": 204,
+      "name": ""
+    },
+    {
+      "exec": 205,
+      "name": ""
+    }
+  ],
+  "keys": [
+    {
+      "page": -1
+    },
+    {
+      "page": 1
+    },
+    {
+      "key": "Clear"
+    },
+    {
+      "cmd": "Oops"
+    },
+    {
+      "key": "Please"
+    },
+    {
+      "exec": 301
+    },
+    {
+      "exec": 302
+    },
+    {
+      "exec": 303
+    },
+    {
+      "exec": 304
+    },
+    {
+      "exec": 305
+    },
+    {
+      "exec": 201
+    },
+    {
+      "exec": 202
+    },
+    {
+      "exec": 203
+    },
+    {
+      "exec": 204
+    },
+    {
+      "exec": 205
+    },
+    {
+      "exec": 101
+    },
+    {
+      "exec": 102
+    },
+    {
+      "exec": 103
+    },
+    {
+      "exec": 104
+    },
+    {
+      "exec": 105
+    }
+  ],
+  "encoders": [
+    {
+      "follow": true,
+      "attribute": "Dimmer",
+      "step": 1
+    },
+    {
+      "follow": true,
+      "page": 1,
+      "push": {
+        "screen": "keypad"
+      }
+    }
+  ],
+  "touch_buttons": [
+    {
+      "label": "Page -",
+      "page": -1
+    },
+    {
+      "label": "Page +",
+      "page": 1
+    },
+    {
+      "label": "Clear",
+      "key": "Clear"
+    },
+    {
+      "label": "Highlight",
+      "cmd": "Highlight",
+      "state": "highlight"
+    },
+    {
+      "label": "Last",
+      "cmd": "Previous"
+    },
+    {
+      "label": "Next",
+      "cmd": "Next"
+    },
+    {
+      "label": "Blind",
+      "cmd": "Blind",
+      "state": "blind"
+    },
+    {
+      "label": "Keypad",
+      "screen": "keypad"
+    },
+    {
+      "label": "Encoders",
+      "screen": "encoders"
+    }
+  ],
+  "encoder_attributes": [
+    "Dimmer",
+    "Pan",
+    "Tilt",
+    "Zoom",
+    "Focus1",
+    "Iris",
+    "Shutter1",
+    "Gobo1",
+    "Color1",
+    "Prism1",
+    "Frost1"
+  ],
+  "pickup": true,
+  "keypad": [
+    [
+      "Fixture",
+      "7",
+      "8",
+      "9",
+      "Thru"
+    ],
+    [
+      "Group",
+      "4",
+      "5",
+      "6",
+      "+"
+    ],
+    [
+      "Preset",
+      "1",
+      "2",
+      "3",
+      "-"
+    ],
+    [
+      "Cue",
+      "0",
+      ".",
+      "At",
+      "Full"
+    ],
+    [
+      "Back",
+      "Clear",
+      "Exec",
+      "<-",
+      "Please"
+    ]
+  ]
+}

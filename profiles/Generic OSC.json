@@ -1,0 +1,145 @@
+{
+  "name": "Generic OSC",
+  "connection": {
+    "type": "generic",
+    "host": "127.0.0.1",
+    "port": 8000,
+    "prefix": "",
+    "listen_port": 9000,
+    "fader_type": "i",
+    "generic": {
+      "fader": "/fader/{n}",
+      "key": "/key/{n}",
+      "encoder": "/encoder/{n}",
+      "push": "/encoder/{n}/push",
+      "button": "/button/{n}"
+    }
+  },
+  "faders": [
+    {
+      "name": "F1"
+    },
+    {
+      "name": "F2"
+    },
+    {
+      "name": "F3"
+    },
+    {
+      "name": "F4"
+    },
+    {
+      "name": "F5",
+      "osc": "/master/level"
+    }
+  ],
+  "keys": [
+    {
+      "osc": "/go"
+    },
+    {
+      "osc": "/stop"
+    },
+    {
+      "osc": "/key/3"
+    },
+    {
+      "osc": "/key/4"
+    },
+    {
+      "osc": "/key/5"
+    },
+    {
+      "osc": "/key/6"
+    },
+    {
+      "osc": "/key/7"
+    },
+    {
+      "osc": "/key/8"
+    },
+    {
+      "osc": "/key/9"
+    },
+    {
+      "osc": "/key/10"
+    },
+    {
+      "osc": "/key/11"
+    },
+    {
+      "osc": "/key/12"
+    },
+    {
+      "osc": "/key/13"
+    },
+    {
+      "osc": "/key/14"
+    },
+    {
+      "osc": "/key/15"
+    },
+    {
+      "osc": "/key/16"
+    },
+    {
+      "osc": "/key/17"
+    },
+    {
+      "osc": "/key/18"
+    },
+    {
+      "osc": "/key/19"
+    },
+    {
+      "osc": "/key/20"
+    }
+  ],
+  "encoders": [
+    {
+      "follow": false
+    },
+    {
+      "page": 1,
+      "push": {
+        "screen": "keypad"
+      }
+    }
+  ],
+  "touch_buttons": [
+    {
+      "label": "Go",
+      "osc": "/go"
+    },
+    {
+      "label": "Stop",
+      "osc": "/stop"
+    },
+    {
+      "label": "Back",
+      "osc": "/back"
+    },
+    {
+      "label": "Keypad",
+      "screen": "keypad"
+    },
+    {
+      "label": "Encoders",
+      "screen": "encoders"
+    }
+  ],
+  "encoder_attributes": [
+    "Dimmer",
+    "Pan",
+    "Tilt",
+    "Zoom",
+    "Focus1",
+    "Iris",
+    "Shutter1",
+    "Gobo1",
+    "Color1",
+    "Prism1",
+    "Frost1"
+  ],
+  "pickup": true
+}

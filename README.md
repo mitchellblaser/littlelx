@@ -226,7 +226,57 @@ boots. Just run the update again. If a new version itself turns out to be
 broken, put the card in a computer and change `os_prefix=` back to the other
 letter.
 
-## Default layout (all of it is editable in `~/.littlelx.json`)
+## Profiles: everything the controller does, as one JSON file
+
+A **profile** describes the whole controller: where it talks to (grandMA3, or
+plain OSC to anything else), what each fader, key and encoder does, the
+touchscreen's main buttons and its keypad. Profiles are plain files in the
+`littlelx-profiles` folder in your home folder - edit them in any text editor,
+copy them, share them. Two examples are put there on first run: `grandMA3.json`
+(the default layout) and `Generic OSC.json`.
+
+The **active** profile is also stored on the controller (next to the learned
+wiring), so it travels with it: plug it into another computer and it brings
+its profile along.
+
+    python3 bridge/littlelx.py --profiles               # list them (* = active)
+    python3 bridge/littlelx.py --use-profile "Generic OSC"   # activate + store on the controller
+
+(stop the bridge first; it uses the new profile when it starts again). Changes
+made on the touchscreen (Setup) are saved into the active profile's file and
+on the controller.
+
+```
+{
+  "name": "My show",
+  "connection": {
+    "type": "ma3",              // or "generic": plain OSC to anything else
+    "host": "192.168.1.20", "port": 8000, "prefix": "/gma3", "listen_port": 9000,
+    "generic": {                // generic: where faders/keys/encoders go ({n} = number)
+      "fader": "/fader/{n}",    //   value 0..1
+      "key": "/key/{n}",        //   1 pressed, 0 released
+      "encoder": "/encoder/{n}",//   +clicks / -clicks
+      "push": "/encoder/{n}/push",
+      "button": "/button/{n}"   //   touchscreen buttons
+    }
+  },
+  "faders": [{"exec": 201, "name": ""}, {"osc": "/my/level"}, ...],   // 5
+  "keys": [{"page": -1}, {"exec": 301}, {"osc": "/go"}, ...],          // 20
+  "encoders": [{"follow": true, "attribute": "Dimmer", "step": 1}, {"page": 1}],
+  "touch_buttons": [{"label": "Go", "osc": "/go"}, {"label": "Keypad", "screen": "keypad"}, ...],
+  "keypad": [["Fixture", "7", "8", "9", "Thru"], ...]                    // 5 rows of 5
+}
+```
+
+Actions (keys, touchscreen buttons, encoder pushes): `{"exec": 201}` (executor
+button), `{"key": "Store"}` (command-line key), `{"cmd": "Go+"}` (command right
+away), `{"page": 1}`, `{"screen": "keypad"}`, `{"resolution": "Dimmer"}`, and
+`{"osc": "/any/address"}` (sends 1 on press, 0 on release - with any
+connection). A fader with `"osc"` sends its level 0..1 there. In a `generic`
+profile, keys and buttons without their own `"osc"` send to the `generic`
+addresses.
+
+## Default layout (all of it is in the active profile, below)
 
 | Control | Does |
 |---------|------|

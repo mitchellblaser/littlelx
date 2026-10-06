@@ -88,9 +88,9 @@ DEFAULTS = {
         "generic": {"fader": "/fader/{n}", "key": "/key/{n}", "encoder": "/encoder/{n}",
                     "push": "/encoder/{n}/push", "button": "/button/{n}"},
     },
-    # Saved connections (the app's Connection tab); "profile" is the one in use,
-    # copied into "osc" above
-    "profiles": [],
+    # The active profile's name: everything the controller does (connection,
+    # faders, keys, encoders, screen) as one JSON file in PROFILE_DIR, also
+    # kept on the controller (see profile_from_cfg)
     "profile": "",
     "ma3": {
         "auto_install": True,     # put the littlelx code into MA3 over OSC
@@ -156,10 +156,13 @@ def load_config():
             save_config(cfg)
     else:
         save_config(cfg)
-    if not cfg.get("profiles"):  # the connection so far becomes the first profile
-        cfg["profiles"] = [profile_from_osc("grandMA3", cfg["osc"])]
-        cfg["profile"] = "grandMA3"
+    cfg.pop("profiles", None)  # an earlier draft's list
+    if not cfg.get("profile"):  # the setup so far becomes the first profile
+        cfg["profile"] = "grandMA3" if cfg["osc"].get("type", "ma3") == "ma3" else "Default"
         save_config(cfg)
+    install_example_profiles()
+    if not os.path.exists(profile_path(cfg["profile"])):
+        save_profile(profile_from_cfg(cfg))
     return cfg
 
 
@@ -209,25 +212,100 @@ def migrate(cfg):
                 e["push"] = {"resolution": m.group(1)}
 
 
-PROFILE_KEYS = ("type", "host", "port", "prefix", "listen_port", "generic")
+# ---- profiles: everything the controller does, as one JSON file
+#
+# {"name": "...",
+#  "connection": {"type": "ma3" | "generic", "host", "port", "prefix",
+#                 "listen_port", "fader_type", "generic": {addresses}},
+#  "faders": [{"exec": 201, "name": "", "osc": "/addr" (generic)}, ...5],
+#  "keys": [20 actions], "encoders": [2], "touch_buttons": [main page],
+#  "keypad": [5 rows of 5 labels] (optional), "encoder_attributes": [...]}
+#
+# Actions: see the top of this file; also {"osc": "/addr"} sends 1 / 0.
+# The active one is also stored on the controller (setup_blob).
+
+PROFILE_DIR = os.path.join(os.path.expanduser("~"), "littlelx-profiles")
+CONN_KEYS = ("type", "host", "port", "prefix", "listen_port", "fader_type", "generic")
+PROFILE_FIELDS = ("faders", "keys", "encoders", "touch_buttons", "keypad", "encoder_attributes", "pickup")
 
 
-def profile_from_osc(name, osc):
-    p = {"name": name}
-    p.update({k: copy.deepcopy(osc[k]) for k in PROFILE_KEYS if k in osc})
+def profile_from_cfg(cfg):
+    p = {"name": cfg.get("profile") or "Default",
+         "connection": {k: copy.deepcopy(cfg["osc"][k]) for k in CONN_KEYS if k in cfg["osc"]}}
+    for k in PROFILE_FIELDS:
+        if k in cfg:
+            p[k] = copy.deepcopy(cfg[k])
     return p
 
 
-def use_profile(cfg, name):
-    """Make the named connection profile the one in use (cfg["osc"])."""
-    for p in cfg.get("profiles", []):
-        if p.get("name") == name:
-            for k in PROFILE_KEYS:
-                if k in p:
-                    cfg["osc"][k] = copy.deepcopy(p[k])
-            cfg["profile"] = name
-            return True
-    return False
+def apply_profile(cfg, prof):
+    """Make a profile the active one (fields it leaves out keep their defaults)."""
+    conn = prof.get("connection", {})
+    for k in CONN_KEYS:
+        cfg["osc"][k] = copy.deepcopy(conn[k]) if k in conn else copy.deepcopy(DEFAULTS["osc"].get(k))
+    for k in PROFILE_FIELDS:
+        if k in prof:
+            cfg[k] = copy.deepcopy(prof[k])
+        elif k in DEFAULTS:
+            cfg[k] = copy.deepcopy(DEFAULTS[k])
+        else:
+            cfg.pop(k, None)
+    cfg["keys"] = (list(cfg.get("keys") or []) + [None] * 20)[:20]
+    cfg["profile"] = prof.get("name") or "Default"
+
+
+def profile_path(name):
+    safe = re.sub(r"[^\w\- .]", "_", name).strip() or "profile"
+    return os.path.join(PROFILE_DIR, safe + ".json")
+
+
+def list_profiles():
+    try:
+        files = sorted(f for f in os.listdir(PROFILE_DIR) if f.endswith(".json"))
+    except OSError:
+        return []
+    out = []
+    for f in files:
+        try:
+            with open(os.path.join(PROFILE_DIR, f)) as fh:
+                out.append(json.load(fh).get("name") or f[:-5])
+        except (OSError, ValueError, AttributeError):
+            pass
+    return out
+
+
+def load_profile(name):
+    with open(profile_path(name)) as f:
+        return json.load(f)
+
+
+def install_example_profiles():
+    """First run: put the example profiles (profiles/ in the repo) in PROFILE_DIR."""
+    if os.path.isdir(PROFILE_DIR):
+        return
+    os.makedirs(PROFILE_DIR, exist_ok=True)
+    src = resource("profiles")
+    for f in (os.listdir(src) if os.path.isdir(src) else []):
+        if f.endswith(".json"):
+            with open(os.path.join(src, f)) as a, open(os.path.join(PROFILE_DIR, f), "w") as b:
+                b.write(a.read())
+
+
+def save_profile(prof):
+    os.makedirs(PROFILE_DIR, exist_ok=True)
+    tmp = profile_path(prof["name"]) + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(prof, f, indent=2)
+    os.replace(tmp, profile_path(prof["name"]))
+
+
+def save_active(cfg, ser=None, keep=False):
+    """The active profile changed: save it everywhere (config, its file, and
+    the controller when connected)."""
+    save_config(cfg)
+    save_profile(profile_from_cfg(cfg))
+    if ser:
+        save_to_mega(cfg, ser, keep=keep)
 
 
 def save_config(cfg):
@@ -641,8 +719,8 @@ def learned(cfg):
 
 def setup_blob(cfg):
     """What the controller carries to any computer: wiring, touch calibration
-    and what the keys do."""
-    return {"hw": cfg["hw"], "touch_cal": cfg.get("touch_cal"), "keys": cfg.get("keys")}
+    and the active profile."""
+    return {"hw": cfg["hw"], "touch_cal": cfg.get("touch_cal"), "profile": profile_from_cfg(cfg)}
 
 
 def save_to_mega(cfg, ser, keep=False):
@@ -685,14 +763,23 @@ def sync_setup(cfg, ser):
     except (OSError, ValueError, zlib.error):
         blob = None
     if blob and blob.get("hw") and any(blob["hw"].get(k) for k in ("faders", "keys", "encoders")):
-        mine = setup_blob(cfg)
-        merged = dict(mine, **{k: v for k, v in blob.items() if k in mine})  # the controller's wins
-        changed = merged != mine
-        if changed:
-            cfg.update(merged)
-            save_config(cfg)
+        changed = False  # the controller's copy wins
+        if blob["hw"] != cfg["hw"] or blob.get("touch_cal") != cfg.get("touch_cal"):
+            cfg["hw"], cfg["touch_cal"] = blob["hw"], blob.get("touch_cal")
+            changed = True
             print("Loaded the learned setup from the controller.")
-        if any(k not in blob for k in mine):  # saved by an older bridge: add what it lacks (keys)
+        prof = blob.get("profile")
+        if prof and prof != profile_from_cfg(cfg):
+            apply_profile(cfg, prof)
+            changed = True
+            print(f"Using the controller's profile '{cfg['profile']}'.")
+            save_profile(profile_from_cfg(cfg))  # so it's in the profiles folder here too
+        elif not prof and blob.get("keys") and blob["keys"] != cfg.get("keys"):  # older bridge: keys only
+            cfg["keys"] = blob["keys"]
+            changed = True
+        if changed:
+            save_config(cfg)
+        if not prof:  # saved by an older bridge: give it the profile
             save_to_mega(cfg, ser)
         return changed
     if learned(cfg):
@@ -986,8 +1073,8 @@ class Screen:
         ky = top + 44
         bw = (w - 4) // 5
         bh = (h - ky - 2) // 5
-        for r, row in enumerate(self.KEYPAD):
-            for c, label in enumerate(row):
+        for r, row in enumerate((self.b.cfg.get("keypad") or self.KEYPAD)[:5]):
+            for c, label in enumerate(row[:5]):
                 wid = self.KEY0 + r * 5 + c
                 self.keymap[wid] = {"keypad": label}
                 digit = label.isdigit() or label == "."
@@ -1283,6 +1370,8 @@ class Screen:
             return "-"
         if "exec" in act:
             return f"Exec {act['exec']}"
+        if "osc" in act:
+            return act["osc"]
         for label, a in cls.KEY_CHOICES:
             if a == act:
                 return label
@@ -1303,9 +1392,7 @@ class Screen:
         while len(keys) <= i:
             keys.append(None)
         keys[i] = act or None
-        save_config(self.b.cfg)
-        if self.b.ser:
-            save_to_mega(self.b.cfg, self.b.ser, keep=True)
+        save_active(self.b.cfg, self.b.ser, keep=True)
         print(f"Key {i + 1} now: {self.describe(act)}")
         self.set_screen("setup")
 
@@ -1419,8 +1506,9 @@ class Screen:
         shown = ma if ma is not None else pos
         if b.picked[i] and pos is not None and time.time() - b.moved_at[i] < b.HANDS_ON:
             shown = pos  # in your hand: MA's echo lags, show the fader itself
-        name = b.ma["name"].get(f["exec"]) if b.ma_linked() else None
-        name = name or f.get("name") or (str(f["exec"]) if self.portrait else f"Exec {f['exec']}")
+        ex = f.get("exec")
+        name = b.ma["name"].get(ex) if b.ma_linked() and ex else None
+        name = name or f.get("name") or ((str(ex) if self.portrait else f"Exec {ex}") if ex else f"F{i + 1}")
         if self.portrait:
             name = name[:7]
         text = f"{name}\n" + ("--" if shown is None else f"{round(shown)}%")
@@ -1429,7 +1517,7 @@ class Screen:
             text += "\n" + ("^ ^ ^" if pos < ma else "v v v")
         marker = int(pos * 10) if (ma is not None and pos is not None) else -1
         # the sequence's colour from MA: dimmed behind, brighter for the level
-        color = b.ma["color"].get(f["exec"]) if b.ma_linked() else None
+        color = b.ma["color"].get(ex) if b.ma_linked() and ex else None
         bg, bar = (shade(color, 0.4), shade(color, 0.85)) if color else (C_BAR_BG, C_BAR)
         bg, bar = bg or C_BAR_BG, bar or C_BAR
         self.setw(self.FADER0 + i, value=int((shown or 0) * 10), text=text, marker=marker,
@@ -1529,9 +1617,7 @@ class Screen:
                 return
             self.reset_armed = 0.0
             self.b.cfg["keys"] = copy.deepcopy(DEFAULTS["keys"])
-            save_config(self.b.cfg)
-            if self.b.ser:
-                save_to_mega(self.b.cfg, self.b.ser, keep=True)
+            save_active(self.b.cfg, self.b.ser, keep=True)
             print("Keys set back to the defaults.")
             self.draw()
             return
@@ -1561,7 +1647,8 @@ class Screen:
         """Generic OSC profile: a touch button sends /button/<n> (except the ones
         that switch the controller's own screens and pages)."""
         buttons = self.b.cfg["touch_buttons"]
-        if not self.b.generic() or act not in buttons or "screen" in act or "page" in act:
+        if (not self.b.generic() or act not in buttons or "screen" in act or "page" in act
+                or "osc" in act):  # its own address: do_action sends it
             return False
         self.b.generic_send("button", buttons.index(act) + 1, value)
         return True
@@ -1813,7 +1900,9 @@ class Bridge:
 
     def ma_fader(self, i):
         """MA's real level for fader i on the current page, if known."""
-        ex = self.cfg["faders"][i]["exec"]
+        ex = self.cfg["faders"][i].get("exec")
+        if ex is None:
+            return None
         if self.ma_linked():
             return self.ma["fader"].get(ex)
         return self.ma_values.get((self.page, ex))
@@ -1924,11 +2013,15 @@ class Bridge:
         hist.append((now, value))
         while hist and now - hist[0][0] > self.ECHO_WINDOW:
             hist.pop(0)
-        if self.generic():
+        own = self.cfg["faders"][i].get("osc") if i < len(self.cfg["faders"]) else None
+        if own:  # a profile's own address for this fader: 0..1
+            addr, arg = own, float(round(value / 100.0, 4))
+            self.osc_raw(addr, arg)
+        elif self.generic():
             self.generic_send("fader", i + 1, float(round(value / 100.0, 4)))
             addr, arg = "fader", value
         else:
-            addr, arg = fader_message(fmt, self.page, self.cfg["faders"][i]["exec"], value)
+            addr, arg = fader_message(fmt, self.page, self.cfg["faders"][i].get("exec", 201 + i), value)
             self.osc(addr, arg)
         if self.verbose:
             print(f"{time.strftime('%H:%M:%S')}.{int(now * 1000) % 1000:03d}  fader {i + 1}: {addr} {arg}")
@@ -1949,7 +2042,8 @@ class Bridge:
             return
         if not down and i not in self.keys_down:
             return  # its press went to Setup: MA never saw it
-        if self.generic():
+        act = self.cfg["keys"][i] if i < len(self.cfg["keys"]) else None
+        if self.generic() and not (act and "osc" in act):  # its own address wins
             self.keys_down.add(i) if down else self.keys_down.discard(i)
             self.generic_send("key", i + 1, 1 if down else 0)
             return
@@ -1961,7 +2055,17 @@ class Bridge:
         if act:
             self.do_action(act, down)
 
+    def osc_raw(self, addr, *args):
+        """An OSC message exactly as given (no prefix): profile "osc" actions."""
+        try:
+            self.sock.sendto(osc_message(addr, *args), self.dest)
+        except OSError as e:
+            print(f"OSC send failed: {e}")
+
     def do_action(self, act, down):
+        if "osc" in act:  # {"osc": "/addr"}: 1 on press, 0 on release (any connection)
+            self.osc_raw(act["osc"], 1 if down else 0)
+            return
         if "exec" in act:
             self.osc(f"/Page{self.page}/Key{act['exec']}", 1 if down else 0)
         elif not down:
@@ -2178,7 +2282,7 @@ class Bridge:
             self.ma_values[(page, ex)] = float(nums[-1])
         if page == self.page:
             for i, f in enumerate(self.cfg["faders"]):
-                if f["exec"] == ex:
+                if f.get("exec") == ex:
                     self.check_pickup(i)
                     if self.pi_ready:
                         self.screen.update_fader(i)
@@ -2212,7 +2316,7 @@ class Bridge:
                 v = float(val)
                 ma["fader"][ex] = v
                 for i, f in enumerate(self.cfg["faders"]):
-                    if f["exec"] == ex:
+                    if f.get("exec") == ex:
                         # Moved in MA by someone else? Then the physical fader must
                         # catch it again. Not if it's just MA reporting one of our
                         # own recent moves late, or the fader is in our hand now.
@@ -2233,7 +2337,7 @@ class Bridge:
             else:
                 ma[kind][ex] = str(val or "")
                 for i, f in enumerate(self.cfg["faders"]):
-                    if f["exec"] == ex and scr:
+                    if f.get("exec") == ex and scr:
                         scr.update_fader(i)
         elif what.startswith("master/"):
             ma["master"][what.split("/", 1)[1].lower()] = int(val or 0)
@@ -2706,6 +2810,30 @@ def save_probe(lines):
     return PROBE_PATH
 
 
+def show_profiles(cfg):
+    print(f"Profiles in {PROFILE_DIR}:")
+    for name in list_profiles():
+        print(("  * " if name == cfg.get("profile") else "    ") + name)
+    print("(* = active. Edit the files, then: --use-profile NAME)")
+
+
+def use_profile_cli(cfg, name):
+    try:
+        prof = load_profile(name)
+    except OSError:
+        sys.exit(f"No profile '{name}' in {PROFILE_DIR} (see --profiles).")
+    except ValueError as e:
+        sys.exit(f"{profile_path(name)} isn't valid JSON: {e}")
+    prof["name"] = prof.get("name") or name
+    apply_profile(cfg, prof)
+    save_config(cfg)
+    print(f"Profile '{cfg['profile']}' is active. Storing it on the controller (stop the bridge first)...")
+    ser = connect(cfg)
+    save_active(cfg, ser)
+    ser.close()
+    print("Restart the bridge (if it is running) to use it.")
+
+
 def ma_probe(cfg):
     """Ask the littlelx code in MA what its Lua offers (encoder diagnostics)."""
     o = cfg["osc"]
@@ -2980,6 +3108,8 @@ def main():
     ap.add_argument("--probe", action="store_true", help="key-matrix wiring diagnostics")
     ap.add_argument("--test-faders", action="store_true", help="find the fader format MA3 accepts")
     ap.add_argument("--ma-probe", action="store_true", help="show what MA's Lua offers (encoder diagnostics)")
+    ap.add_argument("--profiles", action="store_true", help=f"list the profiles (files in {PROFILE_DIR})")
+    ap.add_argument("--use-profile", metavar="NAME", help="make a profile active and store it on the controller")
     ap.add_argument("--verbose", action="store_true", help="print every fader message sent")
     ap.add_argument("--port", help="serial port (default: auto-detect)")
     ap.add_argument("--update-pi", metavar="ZIP", help="update the touchscreen firmware")
@@ -3009,6 +3139,10 @@ def main():
             test_faders(cfg)
         elif args.ma_probe:
             ma_probe(cfg)
+        elif args.profiles:
+            show_profiles(cfg)
+        elif args.use_profile:
+            use_profile_cli(cfg, args.use_profile)
         else:
             print(f"Sending OSC to {cfg['osc']['host']}:{cfg['osc']['port']} prefix '{cfg['osc']['prefix']}'")
             b = Bridge(cfg)
