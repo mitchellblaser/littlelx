@@ -1,7 +1,7 @@
 {
   "name": "Midi Fighter Spectra",
   "match": ["Midi Fighter Spectra", "Spectra"],
-  "about": "DJ TechTools Midi Fighter Spectra: 4 banks of 16 buttons. Bank 1 columns = executors 1-4 (rows from the bottom: 101-104, 201-204, 301-304, 401-404), bank 2 = 5-8, bank 3 = 9-12, bank 4 = 13-15. A button lights in its sequence's colour while the sequence runs.",
+  "about": "DJ TechTools Midi Fighter Spectra: 4 banks of 16 buttons. Bank 1 columns = executors 1-4 (rows from the bottom: 101-104, 201-204, 301-304, 401-404), bank 2 = 5-8, bank 3 = 9-12, bank 4 = 13-15. Buttons are dim in their sequence's colour (nearest of the Spectra's 10) and bright while it runs; empty ones are dark.",
   "controls": [
     {
       "group": "buttons",
@@ -20,10 +20,23 @@
     "button": {
       "msg": "note",
       "channel": 3,
-      "off": 0,
-      "palette": "midifighter",
-      "idle": "off",
-      "on": {"color": "sequence", "default": "#00ff00"}
+      "off": 1,
+      "release": 0,
+      "animation_channel_offset": 1,
+      "palette": [
+        [7, "#ff0000", 13],
+        [19, "#ff6600", 25],
+        [31, "#ffcc00", 37],
+        [43, "#bbdd22", 49],
+        [55, "#00cc00", 61],
+        [67, "#00ffff", 73],
+        [79, "#0000ff", 85],
+        [91, "#8800ff", 97],
+        [103, "#cc00aa", 109],
+        [115, "#ffffff", 115]
+      ],
+      "idle": {"color": "sequence", "default": "#ffffff", "dim": true},
+      "on": {"color": "sequence", "default": "#ffffff"}
     }
   },
   "map": {

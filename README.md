@@ -423,7 +423,12 @@ default layout:
   while it runs.
 * **Midi Fighter Spectra** - bank 1 = executors 1-4 (rows from the bottom:
   101-104, 201-204, 301-304, 401-404), bank 2 = 5-8, bank 3 = 9-12, bank 4 =
-  13-15. A button lights in its sequence's colour while it runs.
+  13-15. Buttons are dim in their sequence's colour and bright while it runs;
+  empty ones are dark. Over MIDI the Spectra has 10 colours (each bright or
+  dim), so a sequence gets the nearest of them; its smooth rainbow is its own
+  sleep animation, not something MIDI can set. Set to another MIDI channel in
+  the Midi Fighter Utility? The bridge notices on the first press and
+  remembers it.
 
 Change what a device does in the Builder's **MIDI** tab (or a profile's
 `"midi"`): its pads and buttons take the same actions as the controller's keys,

@@ -63,15 +63,17 @@ def midifighter_palette():
     return out
 
 
-def nearest(palette, color):
+def nearest(palette, color, dim=False):
     """The palette velocity closest to color (hue first: a dim sequence colour
-    should still pick the right hue)."""
+    should still pick the right hue). Entries are [velocity, colour] or
+    [velocity, colour, its dim velocity]; dim picks the latter when there is one."""
     c = rgb(color)
     if not c or not palette:
         return palette[0][0] if palette else 1
     h, s, v = colorsys.rgb_to_hsv(*(x / 255 for x in c))
-    best, bd = palette[0][0], None
-    for vel, hx in palette:
+    best, bd = palette[0], None
+    for entry in palette:
+        hx = entry[1]
         p = rgb(hx)
         if not p:
             continue
@@ -82,8 +84,8 @@ def nearest(palette, color):
             dh = abs(h - ph)
             d = min(dh, 1 - dh) * 4
         if bd is None or d < bd:
-            best, bd = vel, d
-    return best
+            best, bd = entry, d
+    return best[2] if dim and len(best) > 2 else best[0]
 
 
 class Backend:
@@ -305,8 +307,8 @@ class Device:
         number = int(c["numbers"][i])
         how = led.get(state) if state != "off" else "off"
         ch = int(led.get("channel", c.get("channel", 1))) - 1
-        if group in self.channels and "channel" not in led or led.get("channel") == c.get("channel"):
-            ch = self.channels.get(group, ch)  # the device sends on another channel: light it there too
+        if group in self.channels and int(led.get("channel", c.get("channel", 1))) == int(c.get("channel", 1)):
+            ch = self.channels[group]  # the device sends on another channel: light it there too
         vel = int(led.get("off", 0))
         if isinstance(how, dict):
             ch = int(how.get("channel", ch + 1)) - 1
@@ -315,12 +317,12 @@ class Device:
             else:
                 col = color if how.get("color") == "sequence" and rgb(color) and rgb(color) != (0, 0, 0) \
                     else how.get("default", "#ffffff") if how.get("color") == "sequence" else how.get("color")
-                vel = nearest(self.palette(led), col) + int(how.get("blink", 0))
+                vel = nearest(self.palette(led), col, how.get("dim")) + int(how.get("blink", 0))
         status = (0x90 if led.get("msg", "note") == "note" else 0xB0) | (ch & 15)
         key = (number,)
         if self.leds.get(key) == (status, vel):
             return
-        if key in self.leds and (self.leds[key][0] & 15) != (status & 15):
+        if self.leds.get(key) and (self.leds[key][0] & 15) != (status & 15):
             self.send((0x80 | (self.leds[key][0] & 15), number, 0))  # other channel: drop the old one
         self.leds[key] = (status, vel)
         self.send((status, number, vel))
@@ -331,8 +333,40 @@ class Device:
                 for i in range(len(c.get("numbers", []))):
                     self.light(c["group"], i, "off", None)
 
-    def close(self):
+    def reset_channel(self, group, ch, value=0):
+        """Hand group's lights on channel ch (and its animation channel, if the
+        device has one: e.g. the Spectra's flash / pulse) back to the device."""
+        c = self.control(group)
+        led = (self.spec.get("leds") or {}).get(c.get("led")) if c else None
+        if not led:
+            return
+        chans = [ch] + ([ch + int(led["animation_channel_offset"])] if "animation_channel_offset" in led else [])
+        for n in c.get("numbers", []):
+            for k in chans:
+                self.send((0x90 | (k & 15), int(n), value))
+
+    def start(self):
+        """Just plugged in: no animations left over, everything dark."""
+        for c in self.spec.get("controls", []):
+            led = (self.spec.get("leds") or {}).get(c.get("led"))
+            if led and "animation_channel_offset" in led:
+                ch = self.channels.get(c["group"], int(led.get("channel", c.get("channel", 1))) - 1)
+                k = ch + int(led["animation_channel_offset"])
+                for n in c.get("numbers", []):
+                    self.send((0x90 | (k & 15), int(n), 0))
         self.all_off()
+
+    def close(self):
+        for c in self.spec.get("controls", []):  # give the lights back to the device
+            led = (self.spec.get("leds") or {}).get(c.get("led"))
+            if led and "release" in led:
+                ch = self.channels.get(c["group"], int(led.get("channel", c.get("channel", 1))) - 1)
+                self.reset_channel(c["group"], ch, int(led["release"]))
+                for n in c.get("numbers", []):
+                    self.leds[(int(n),)] = None
+        if not any((self.spec.get("leds") or {}).get(c.get("led"), {}).get("release") is not None
+                   for c in self.spec.get("controls", [])):
+            self.all_off()
         for p in (self.inp, self.out):
             try:
                 p and p.close_port()
@@ -360,6 +394,25 @@ class Midi:
         self.scanned = 0.0
         self.dirty = True
         self.lock = threading.Lock()
+        self.learned = self.load_learned()  # device -> {group: channel} it really uses
+
+    def learned_path(self):
+        return os.path.join(self.user_dir, "channels.json") if self.user_dir else None
+
+    def load_learned(self):
+        try:
+            with open(self.learned_path()) as f:
+                return json.load(f)
+        except (OSError, TypeError, ValueError):
+            return {}
+
+    def save_learned(self):
+        try:
+            os.makedirs(self.user_dir, exist_ok=True)
+            with open(self.learned_path(), "w") as f:
+                json.dump(self.learned, f)
+        except (OSError, TypeError):
+            pass
 
     # ---- which devices
     def entries(self):
@@ -422,6 +475,7 @@ class Midi:
             out = next((o for o in outs if o == name), None) or next((o for o in outs if matches(spec, o)), None)
             dev = Device(spec, entry, name, out)
             dev.backend = backend
+            dev.channels = dict(self.learned.get(dev.name, {}))  # as found last time
             try:
                 dev.inp = backend.open_input(name, lambda msg, d=dev: self.b.post_midi(d, msg))
                 dev.out = backend.open_output(out) if out else None
@@ -431,7 +485,7 @@ class Midi:
                 continue
             self.devices[name] = dev
             print(f"MIDI: {dev.name} connected ({name})")
-            dev.all_off()
+            dev.start()
             self.dirty = True
 
     # ---- what's connected (the app reads this from its own thread: a snapshot)
@@ -453,9 +507,15 @@ class Midi:
         if not hit:
             hit = dev.loose.get((kind, number))
             if hit and dev.channels.get(hit[0]) != ch:
+                c = dev.control(hit[0])
+                old = dev.channels.get(hit[0], int(c.get("channel", 1)) - 1)
+                dev.reset_channel(hit[0], old)  # whatever went to the wrong channel: undone
                 dev.channels[hit[0]] = ch
                 print(f"MIDI: {dev.name} sends on channel {ch + 1}: using that")
+                self.learned.setdefault(dev.name, {})[hit[0]] = ch
+                self.save_learned()
                 dev.leds = {}
+                dev.start()
                 self.dirty = True  # its lights on that channel too
         if not hit and (kind, ch, number) not in dev.told and len(dev.told) < 20:
             dev.told.add((kind, ch, number))
