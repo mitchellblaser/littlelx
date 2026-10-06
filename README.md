@@ -172,10 +172,17 @@ python3 bridge/littlelx.py --calibrate    # Windows: littlelx.exe --calibrate
 runs on another machine, set `"host"` in `~/.littlelx.json` to its IP address
 (on Windows, allow the bridge through the firewall when asked).
 
-Then add a **second** OSC line so MA can talk back. Set **Destination IP** to
-the bridge computer (`127.0.0.1` if MA3 onPC runs on the same computer), the
-port to `9000`, and **Send** = Yes. If it isn't line **2**, set
-`"ma3": {"osc_line": N}` in `~/.littlelx.json`.
+MA also needs a line to talk back on: **the plugin makes it**. It looks for an
+OSC line named **littlelx** and, if there isn't one, adds it; if there is, it
+puts its Destination IP (this computer, as MA sees it), port (`9000`) and
+**Send** right, and switches MA's OSC output on. MA's command line feedback
+says what it changed. Already have a line for it? Name it `littlelx` (or put
+its name - no spaces - in the Builder's Connection tab, "MA's OSC line back";
+a number works too, as before). If your MA version won't let the plugin make
+the line, add it by hand: name `littlelx`, Destination IP = this computer
+(`127.0.0.1` for onPC on the same computer), port `9000`, Send = Yes. **Setup >
+MA probe** on the touchscreen (or `littlelx.py --ma-probe`) lists MA's OSC
+lines as the plugin sees them.
 
 That's all. **The bridge installs its own code into MA3 over OSC** (no plugin to
 import) and starts it, and it reinstalls it by itself after MA restarts or loads

@@ -82,7 +82,7 @@ def bridge_version():
 #   {"cmd": "... {d} ..."}               {d} = step per click, or {"page": 1}
 # Push actions also allow {"resolution": "Dimmer"}: toggle MA's Coarse/Fine.
 
-CONFIG_VERSION = 10
+CONFIG_VERSION = 11
 
 DEFAULTS = {
     "config_version": CONFIG_VERSION,
@@ -112,7 +112,8 @@ DEFAULTS = {
     "profile": "",
     "ma3": {
         "auto_install": True,     # put the littlelx code into MA3 over OSC
-        "osc_line": 2,            # MA3 OSC line that SENDS to this computer (port 9000)
+        "osc_line": "littlelx",   # MA3 OSC line that SENDS to this computer: its name (the
+                                  # plugin makes / fixes it) or, as before, its number
         "tick": 0.1,              # how often MA reports (s)
     },
     "serial_port": "",            # "" = auto-detect, or e.g. "COM5" / "/dev/cu.usbmodem1101"
@@ -184,6 +185,8 @@ def load_config():
 def migrate(cfg):
     """Bring a config saved by an older version up to date (runs once)."""
     cfg.pop("encoder_attributes", None)  # the encoders follow MA's now
+    if cfg.get("ma3", {}).get("osc_line") == 2 and cfg.get("config_version", 1) < 11:
+        cfg["ma3"]["osc_line"] = "littlelx"  # by name now; the plugin makes the line
     labels = [b.get("label") for b in cfg.get("touch_buttons", [])]
     old_defaults = (["Page -", "Page +", "Clear", "Oops", "Keypad", "Go -", "Pause", "Go +",
                      "Highlight", "Blind", "Last", "Next"],
@@ -244,7 +247,7 @@ def migrate(cfg):
 
 PROFILE_DIR = os.path.join(os.path.expanduser("~"), "littlelx-profiles")
 CONN_KEYS = ("type", "host", "port", "prefix", "listen_port", "fader_type", "generic", "values",
-             "fader_interval", "fader_jump")
+             "fader_interval", "fader_jump", "ma_line")
 PROFILE_FIELDS = ("faders", "keys", "encoders", "touch_buttons", "keypad", "pickup",
                   "screen", "feedback", "screens", "midi")
 
@@ -2481,7 +2484,35 @@ class Bridge:
                 self._ma_ver = f"{zlib.crc32(open(resource('ma3', 'littlelx.lua'), 'rb').read()):08x}"
             except OSError:
                 self._ma_ver = ""
-        return f"{self._ma_ver}-{zlib.crc32(self.watch_spec().encode()) & 0xffff:04x}"
+        extra = f"{self.watch_spec()} {self.ma_line()} {self.listen_address()}"
+        return f"{self._ma_ver}-{zlib.crc32(extra.encode()) & 0xffff:04x}"
+
+    def ma_line(self):
+        """The OSC line MA reports on: a name (made / fixed by the plugin) or a number."""
+        v = self.cfg["osc"].get("ma_line") or self.cfg.get("ma3", {}).get("osc_line") or "littlelx"
+        v = str(v).strip()
+        return v if v.isdigit() else (re.sub(r"[^A-Za-z0-9_\-]", "_", v) or "littlelx")
+
+    def listen_address(self):
+        """Where MA should send to: this computer's address as MA sees it, and
+        the feedback port."""
+        host = self.cfg["osc"].get("host", "127.0.0.1")
+        key = (host, self.cfg["osc"].get("port"), self.cfg["osc"].get("listen_port"))
+        cached = getattr(self, "_listen", None)
+        if cached and cached[0] == key and time.time() - cached[1] < 10:
+            return cached[2]  # asked often (MA code version check): look it up now and then
+        ip = "127.0.0.1"
+        if not host.startswith("127.") and host != "localhost":
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                s.connect((host, int(self.cfg["osc"].get("port", 8000))))  # no packet: picks the interface
+                ip = s.getsockname()[0]
+                s.close()
+            except OSError:
+                pass
+        addr = f"{ip}:{int(self.cfg['osc'].get('listen_port', 9000))}"
+        self._listen = (key, time.time(), addr)
+        return addr
 
     def watch_spec(self):
         """The executors MA reports (names, colours, running, fader levels):
@@ -2502,8 +2533,9 @@ class Bridge:
             print(f"Can't find the MA3 code to install ({e})")
             return
         conf = self.cfg.get("ma3", {})
-        line, tick = int(conf.get("osc_line", 2)), float(conf.get("tick", 0.1))
-        print(f"Installing littlelx into MA3 (it reports back on OSC line {line})...")
+        line, tick = self.ma_line(), float(conf.get("tick", 0.1))
+        print(f"Installing littlelx into MA3 (it reports back on OSC line "
+              f"{line if line.isdigit() else repr(line)}, to {self.listen_address()})...")
         self.ma_installed_at = time.time()
         h = src.hex()
         pieces = [h[off:off + 240] for off in range(0, len(h), 240)]
@@ -2512,7 +2544,8 @@ class Bridge:
                                    if e and isinstance(e.get("push"), dict) and "resolution" in e["push"]})) or "Dimmer"
         attrs = re.sub(r"[^A-Za-z0-9,_]", "", attrs)
         start = 'Lua "' + self.MA_RUN.replace(
-            "{arg}", f"__start {line} {tick} {attrs} {self.ma_code_version()} {self.watch_spec()}") + '"'
+            "{arg}", f"__start {line} {tick} {attrs} {self.ma_code_version()} {self.watch_spec()} "
+                     f"{self.listen_address()}") + '"'
 
         def send_all():  # spaced out for MA, on its own thread so faders never wait
             for i, piece in enumerate(pieces, 1):

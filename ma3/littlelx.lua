@@ -23,6 +23,8 @@
 --                  Timer (bridge install); also report those attributes'
 --                  resolution, and the version so the bridge can update us;
 --                  optionally the executors to report ("101-115,201-208")
+--                  and where the bridge listens ("192.168.1.5:9000"): <osc
+--                  line> may be a name, and that line is made / put right
 --
 -- MA needs an OSC line that SENDS to the bridge computer (its IP, port 9000,
 -- Send = Yes). Its number is passed by the bridge; 2 if run as a plugin.
@@ -554,6 +556,93 @@ local function report_encoders()
 	for k = #list + 1, MAXENC do last["enc" .. k] = nil end
 end
 
+-- ---- the OSC line we report on ------------------------------------------
+-- Found by name (the bridge says which, "littlelx" by default) and made if
+-- it's missing; its destination / port / Send are put right. MA versions
+-- name things differently: every access is guarded and tries the variants.
+local function osc_base()
+	for _, f in ipairs({ function() return ShowData().OSCBase end,
+		function() return ShowData()["OSCBase"] end, function() return Root().ShowData.OSCBase end }) do
+		local ok, b = pcall(f)
+		if ok and b then return b end
+	end
+	local ok, kids = pcall(function() return ShowData():Children() end)
+	for _, k in ipairs(ok and kids or {}) do
+		local okc, c = pcall(function() return k:GetClass() end)
+		if okc and c == "OSCBase" then return k end
+	end
+	return nil
+end
+
+local function kids_of(h)
+	local ok, k = pcall(function() return h:Children() end)
+	return ok and k or {}
+end
+
+local function set_prop(h, value, ...) -- set the first of these properties that takes it
+	for _, k in ipairs({ ... }) do
+		for _, how in ipairs({ function() h:Set(k, value) end, function() h[k] = value end }) do
+			if pcall(how) then
+				local v = prop(h, k)
+				if v ~= nil and tostring(v):lower() == tostring(value):lower() then return true end
+			end
+		end
+	end
+	return false
+end
+
+local function is_yes(v)
+	v = tostring(v or ""):lower()
+	return v == "yes" or v == "1" or v == "true" or v == "on"
+end
+
+local function ensure_line(name, dest)
+	local base = osc_base()
+	if not base then
+		Printf("littlelx: can't find MA's OSC settings - add an OSC line named '" .. name .. "' by hand")
+		return nil
+	end
+	local line, idx
+	for i, o in ipairs(kids_of(base)) do
+		if oname(o) == name then line, idx = o, i end
+	end
+	local did = {}
+	if not line then
+		for _, f in ipairs({ function() return base:Append() end, function() return base:Acquire() end,
+			function() return base:Append("OSCData") end }) do
+			local ok, o = pcall(f)
+			if ok and o then line = o break end
+		end
+		if not line then
+			Printf("littlelx: couldn't make the OSC line '" .. name .. "' - add it by hand (see the README)")
+			return nil
+		end
+		set_prop(line, name, "Name", "name")
+		idx = #kids_of(base)
+		did[#did + 1] = "made"
+	end
+	local ip, port = (dest or ""):match("^([%d%.]+):(%d+)$")
+	if ip then
+		local cur = prop(line, "DestinationIP", "Destination", "DestinationIp", "IP")
+		if tostring(cur or "") ~= ip and set_prop(line, ip, "DestinationIP", "Destination", "DestinationIp", "IP") then
+			did[#did + 1] = "destination " .. ip
+		end
+		if tostring(prop(line, "Port", "port") or "") ~= port and set_prop(line, port, "Port", "port") then
+			did[#did + 1] = "port " .. port
+		end
+	end
+	if not is_yes(prop(line, "Send", "send")) and set_prop(line, "Yes", "Send", "send") then
+		did[#did + 1] = "Send on"
+	end
+	for _, k in ipairs({ "EnableOutput", "Enable Output", "OutputEnable" }) do -- the menu's master switch
+		local v = prop(base, k)
+		if v ~= nil and not is_yes(v) and set_prop(base, "Yes", k) then did[#did + 1] = "OSC output enabled" end
+	end
+	if #did > 0 then Printf("littlelx: OSC line '" .. name .. "': " .. table.concat(did, ", ")) end
+	local no = prop(line, "no", "No", "index")
+	return num(no) or idx
+end
+
 -- "probe": print what this MA version offers, to the command line feedback
 local function probe()
 	local out = {}
@@ -604,6 +693,14 @@ local function probe()
 	end
 	local sf = try(SelectionFirst)
 	say("selection first:", sf)
+	local base = osc_base()
+	say("OSC settings:", base and oname(base) or "not found", base and tostring(prop(base, "EnableOutput", "Enable Output")))
+	for i, o in ipairs(base and kids_of(base) or {}) do
+		say("  OSC line", i, "no=", tostring(prop(o, "no", "No")), "name=", oname(o), "dest=",
+			tostring(prop(o, "DestinationIP", "Destination", "IP")), "port=", tostring(prop(o, "Port")),
+			"send=", tostring(prop(o, "Send")), "receive=", tostring(prop(o, "Receive")),
+			"cmd=", tostring(prop(o, "ReceiveCommand")))
+	end
 	-- named values (gobos etc.) of the selected feature's attributes
 	local function cls(h)
 		local ok, c = pcall(function() return h:GetClass() end)
@@ -816,8 +913,12 @@ end
 
 -- Bridge install: no plugin object, so run from MA's Timer. The Timer API
 -- documents a whole-second delay; try our tick first, fall back to 1 s.
-local function start_timer(line, tick_s, attrs, ver, execs)
-	OSC_LINE = num(line) or OSC_LINE
+local function start_timer(line, tick_s, attrs, ver, execs, dest)
+	if num(line) then
+		OSC_LINE = num(line)
+	elseif line and line ~= "" then -- by name: find (or make) it
+		OSC_LINE = ensure_line(line, dest) or OSC_LINE
+	end
 	if execs and execs ~= "" then -- "101-115,201-208,301"
 		local w = {}
 		for part in execs:gmatch("[^,]+") do
@@ -854,9 +955,10 @@ end
 
 local function main(display, arg)
 	if arg and arg ~= "" then
-		local line, tick_s, attrs, ver, execs = arg:match("^__start%s+(%S+)%s*(%S*)%s*(%S*)%s*(%S*)%s*(%S*)")
+		local line, tick_s, attrs, ver, execs, dest =
+			arg:match("^__start%s+(%S+)%s*(%S*)%s*(%S*)%s*(%S*)%s*(%S*)%s*(%S*)")
 		if line then
-			start_timer(line, tick_s, attrs, ver, execs)
+			start_timer(line, tick_s, attrs, ver, execs, dest)
 		else
 			act(arg)
 		end

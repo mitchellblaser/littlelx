@@ -355,6 +355,10 @@ class ConnectionPage(QWidget):
         f.addRow("Port", self.port)
         f.addRow("Prefix", self.prefix)
         f.addRow("Listen for feedback on port", self.listen)
+        self.ma_line = QLineEdit()
+        self.ma_line.setPlaceholderText("littlelx  (made in MA if missing)")
+        self.ma_line_label = QLabel("MA's OSC line back (name or number)")
+        f.addRow(self.ma_line_label, self.ma_line)
         f.addRow("Fader messages every (s)", self.interval)
         f.addRow("A move of this % goes out at once", self.jump)
         lay.addWidget(top)
@@ -393,6 +397,8 @@ class ConnectionPage(QWidget):
 
     def show_generic(self):
         g = self.type.currentData() == "generic"
+        self.ma_line.setVisible(not g)
+        self.ma_line_label.setVisible(not g)
         self.gen_box.setVisible(g)
         self.val_box.setVisible(g)
 
@@ -403,6 +409,7 @@ class ConnectionPage(QWidget):
         self.port.setValue(int(c.get("port", 8000)))
         self.prefix.setText(text_of(c.get("prefix")))
         self.listen.setValue(int(c.get("listen_port", 9000)))
+        self.ma_line.setText(text_of(c.get("ma_line")))
         self.interval.setValue(float(c.get("fader_interval", 0.025)))
         self.jump.setValue(float(c.get("fader_jump", 5)))
         gen = dict(lx.DEFAULTS["osc"]["generic"], **(c.get("generic") or {}))
@@ -425,6 +432,7 @@ class ConnectionPage(QWidget):
         c["port"] = self.port.value()
         c["prefix"] = self.prefix.text().strip()
         c["listen_port"] = self.listen.value()
+        put(c, "ma_line", self.ma_line.text().strip())
         c["fader_interval"] = round(self.interval.value(), 3)
         c["fader_jump"] = round(self.jump.value(), 2)
         c["generic"] = {k: e.text().strip() for k, e in self.gen.items() if e.text().strip()}
