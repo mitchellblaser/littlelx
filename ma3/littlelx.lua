@@ -15,7 +15,8 @@
 --   "res Dimmer"   toggle MA's encoder resolution for an attribute (Coarse/Fine)
 --   "probe"        print what this MA version's Lua offers (encoder diagnostics)
 --   "resync"       report everything again (the bridge restarted)
---   "tab Gobo2Pos" encoders show that feature of the group (MA's tabs)
+--   "group Position"  move MA's encoder bar to that feature group (bank)
+--   "tab Gobo2Pos" ... to that feature (tab) of the current group
 --   "sets Gobo1"   report the selected fixture's named values for an attribute
 --   "setv Gobo1 3" apply the 3rd of them to the selection
 --   "__start <osc line> <tick> [Attr,Attr] [version]"   start reporting from a
@@ -188,7 +189,7 @@ end
 local defs
 local function attribute_defs()
 	if defs then return defs end
-	defs = { attrs_of = {}, group_of = {}, groups = {} }
+	defs = { attrs_of = {}, group_of = {}, groups = {}, group_order = {} }
 	local ok, attrs = pcall(function() return ShowData().LivePatch.AttributeDefinitions.Attributes:Children() end)
 	for _, a in ipairs(ok and attrs or {}) do
 		local fh = prop(a, "Feature", "feature")
@@ -198,7 +199,10 @@ local function attribute_defs()
 				defs.attrs_of[fname] = {}
 				local g = (type(fh) ~= "string" and feature_group(fh)) or ""
 				defs.group_of[fname] = g
-				defs.groups[g] = defs.groups[g] or {}
+				if not defs.groups[g] then
+					defs.groups[g] = {}
+					table.insert(defs.group_order, g)
+				end
 				table.insert(defs.groups[g], fname)
 			end
 			table.insert(defs.attrs_of[fname], { name = oname(a), pretty = tostring(prop(a, "Pretty", "pretty") or oname(a)) })
@@ -434,8 +438,6 @@ local function apply_set(aname, n)
 	Printf(string.format("littlelx: %s %s -> At %s (programmer call not available)", aname, set.name, v))
 end
 
-local tab_choice        -- a tab picked on the controller (until MA's own selection changes)
-local ma_feature        -- the feature MA had selected last time
 local has_cache = {}    -- "fixture/feature" -> does the fixture have any of its attributes
 
 local function fixture_has(sf, fname)
@@ -453,14 +455,67 @@ local function fixture_has(sf, fname)
 	return has_cache[key]
 end
 
+-- ---- moving MA's encoder bar (a bank / tab picked on the controller; the
+-- controller's encoders then follow MA as always). Which command does it
+-- differs by MA version: try them, check MA's selected feature after each,
+-- and remember what worked.
+local SELECT_CMDS = {
+	function(g) return string.format('FeatureGroup "%s"', g) end,
+	function(g, f) return string.format('Feature "%s"."%s"', g, f) end,
+	function(g, f) return string.format('Feature "%s"', f) end,
+}
+local select_works = {}  -- command -> true / false, once tried
+
+local function selected_is(group, feat)
+	local fe = try(SelectedFeature)
+	if not fe then return false end
+	if feat then return oname(fe) == feat end
+	return feature_group(fe) == group
+end
+
+local function ma_select(group, feat)
+	local first = feat
+	if not first then -- a bank: also try its first feature this fixture has
+		local sf = try(SelectionFirst)
+		for _, f in ipairs(attribute_defs().groups[group] or {}) do
+			if sf ~= nil and fixture_has(sf, f) then
+				first = f
+				break
+			end
+		end
+	end
+	for k, make in ipairs(SELECT_CMDS) do
+		local f = k > 1 and first or nil
+		if select_works[k] ~= false and (k == 1 and not feat or k > 1 and f) then
+			Cmd(make(group, f))
+			local ok = selected_is(group, k > 1 and f or nil)
+			if select_works[k] == nil then select_works[k] = ok end
+			if ok then return true end
+		end
+	end
+	Printf("littlelx: couldn't move MA's encoder bar to " .. group .. (feat and ("." .. feat) or ""))
+	send("busy", "s", "MA's encoder bar didn't move")
+	return false
+end
+
 local function report_encoders()
 	local feat = try(SelectedFeature)
 	local mname = oname(feat) or ""
-	if mname ~= ma_feature then -- MA's own tab changed: follow it
-		ma_feature, tab_choice = mname, nil
-	end
-	local group = (feat and feature_group(feat)) or attribute_defs().group_of[mname] or ""
+	local ma_group = (feat and feature_group(feat)) or attribute_defs().group_of[mname] or ""
 	local sf = try(SelectionFirst)
+	-- the feature groups (encoder banks) this fixture has anything in
+	local groups = {}
+	if sf ~= nil then
+		for _, g in ipairs(attribute_defs().group_order) do
+			for _, f in ipairs(attribute_defs().groups[g]) do
+				if fixture_has(sf, f) then
+					groups[#groups + 1] = g
+					break
+				end
+			end
+		end
+	end
+	local group = ma_group
 	-- the group's features this fixture has: the tabs (like MA's encoder bar)
 	local tabs = {}
 	if sf ~= nil then
@@ -469,9 +524,6 @@ local function report_encoders()
 		end
 	end
 	local fname = mname
-	for _, t in ipairs(tabs) do
-		if t == tab_choice then fname = t end
-	end
 	local list = {}
 	if fname ~= "" and sf ~= nil then -- nothing selected: the encoders have nothing to turn
 		for _, a in ipairs(feature_attrs(fname)) do
@@ -490,6 +542,8 @@ local function report_encoders()
 	end
 	local t = table.concat(tabs, "|")
 	if changed("tabs", t) then send("tabs", "s", t) end
+	local gs = table.concat(groups, "|")
+	if changed("groups", gs) then send("groups", "s", gs) end
 	if changed("encn", #list) then send("encn", "i", #list) end
 	for k, e in ipairs(list) do
 		if changed("enc" .. k, e) then send("enc/" .. k, "s", e) end
@@ -703,8 +757,13 @@ local function act(arg)
 		report(true)
 		return
 	end
-	if verb == "tab" then -- "tab Gobo2Pos": the encoders show that feature
-		tab_choice = rest
+	if verb == "group" or verb == "tab" then -- move MA's encoder bar; ours follows MA
+		local grp = rest
+		if verb == "tab" then
+			local fe = try(SelectedFeature)
+			grp = (fe and feature_group(fe)) or attribute_defs().group_of[rest] or ""
+		end
+		ma_select(grp, verb == "tab" and rest or nil)
 		last["feat"] = nil
 		report_encoders()
 		return

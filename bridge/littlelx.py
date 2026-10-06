@@ -1159,6 +1159,8 @@ class Screen:
             self.draw_exec_entry(int(self.name[4:]))
         elif self.name.startswith("entry"):
             self.draw_value_entry(int(self.name[5:]))
+        elif self.name == "fgroups":
+            self.draw_fgroups()
         else:
             self.draw_main()
 
@@ -1294,7 +1296,9 @@ class Screen:
         self.enc_mode = b.ma_encoders_on() and not self.enc_simple
         top = self.header_h() + 4
         self.keymap = {}
-        self.widget(self.ENC_FEAT, "L", 4, top, w - 100, 40, C_PANEL, C_TEXT, C_PANEL, 1, 1, 0, "")
+        if self.enc_mode:  # tap the bank's name: pick another bank (Dimmer, Position, ...)
+            self.keymap[self.ENC_FEAT] = {"fgroups": True}
+        self.widget(self.ENC_FEAT, "B", 4, top, w - 100, 40, C_PANEL, C_TEXT, C_PANEL, 1, 1, 0, "")
         self.keymap[self.ENC_PAGE] = {"encpage": 1}
         self.widget(self.ENC_PAGE, "B", w - 92, top, 88, 40, C_KEY2, C_TEXT, C_BTN_ON, 1, 0, 0, "")
         top += 46
@@ -1321,6 +1325,31 @@ class Screen:
             self.widget(base + 2, "B", 8, by, w - 16, bh, C_BTN, C_TEXT, C_BTN_ON, 1, 0, 0, "")
         self.back_button()
         self.update_encoders()
+
+    def draw_fgroups(self):
+        """The encoder banks (MA's feature groups) the selected fixture has:
+        tap one to put the encoders on it."""
+        w = self.w
+        top = self.header_h() + 4
+        self.keymap = {}
+        self.widget(self.SET_TITLE, "L", 4, top, w - 8, 36, C_PANEL, C_TEXT, C_PANEL, 1, 0, 0, "Encoder bank")
+        groups = self.b.ma["groups"][:24]
+        cur = self.b.ma["feat"][1]
+        cols = 2 if len(groups) <= 8 else 3
+        y = top + 40
+        rows = max(1, -(-len(groups) // cols))
+        bw, bh = (w - 4) // cols, min(70, (self.h - 62 - y) // rows)
+        for n, g in enumerate(groups):
+            r, c = divmod(n, cols)
+            color = FEATURE_COLORS.get(g.lower(), C_KEY2)
+            wid = self.SET0 + n
+            self.keymap[wid] = {"fgroup": g}
+            self.widget(wid, "B", 4 + c * bw, y + r * bh, bw - 3, bh - 4, shade(color, 0.45), C_TEXT,
+                        shade(color, 0.9), 1, 0, 1 if g == cur else 0, g)
+        if not groups:
+            self.widget(self.SET0, "L", 4, y, w - 8, 60, C_BG, C_DIM, C_BG, 0, 0, 0, "Select fixtures in MA")
+        self.keymap[self.BACK] = {"back": "encoders"}
+        self.widget(self.BACK, "B", 4, self.h - 58, w - 8, 54, C_KEY2, C_TEXT, C_BTN_ON, 1, 0, 0, "Back")
 
     def show_tabs(self):
         """Fill the tab buttons: the current tab lit; with more tabs than fit, the
@@ -1379,7 +1408,8 @@ class Screen:
         pages = b.enc_pages()
         if self.enc_mode:
             title = group if self.enc_tabs and group else fname
-            self.setw(self.ENC_FEAT, text=" " + title, colors=(shade(gcolor, 0.55), C_TEXT, C_PANEL))
+            more = "  v" if len(b.ma["groups"]) > 1 else ""  # tap for the other banks
+            self.setw(self.ENC_FEAT, text=" " + title + more, colors=(shade(gcolor, 0.55), C_TEXT, C_PANEL))
             self.setw(self.ENC_PAGE, text=f"{b.enc_page + 1}/{pages}",
                       colors=(C_KEY2, C_TEXT if pages > 1 else C_DIM, C_BTN_ON))
         else:
@@ -1875,6 +1905,14 @@ class Screen:
                             f"key{self.name[4:]}" if self.name.startswith("exec") else "main")
         elif "encpage" in act:
             self.b.next_enc_page()
+        elif "fgroups" in act:
+            if self.b.ma["groups"]:
+                self.set_screen("fgroups")
+        elif "fgroup" in act:
+            self.b.ma_plugin(f"group {act['fgroup']}")  # MA's report switches the encoders
+            self.b.enc_page = 0
+            self.tab_paged = False
+            self.set_screen("encoders")
         elif "tab" in act:
             self.b.ma_plugin(f"tab {act['tab']}")  # MA's report switches the encoders
             self.b.enc_page = 0
@@ -1898,7 +1936,7 @@ class Screen:
 
     def on_release(self, wid):
         act = self.keymap.get(wid)
-        if act and not any(k in act for k in ("keypad", "back", "encpage", "tab", "tabpage", "edit", "assign",
+        if act and not any(k in act for k in ("keypad", "back", "encpage", "tab", "tabpage", "fgroups", "fgroup", "edit", "assign",
                                               "digit", "reset_keys", "entry", "vkey", "setv", "setpage", "probe")):
             if not self.generic_button(act, 0):
                 self.b.do_action(act, False)
@@ -1989,7 +2027,8 @@ class Bridge:
                        busy="", busy_at=0.0, res={}, color={},
                        feat=("", "", False), encn=0, encs={}, ver=None, linked_at=0.0,
                        sets={},  # attribute -> named values of the selected fixture
-                       tabs=[])  # the feature group's features the fixture has  # MA's encoders (see report_encoders)
+                       tabs=[],  # the feature group's features the fixture has
+                       groups=[])  # the feature groups (encoder banks) it has  # MA's encoders (see report_encoders)
         self.keys_down = set()               # hardware keys whose press was acted on
         self.probe_lines = []                # MA probe answer being received
         self.enc_page = 0                    # which pair of MA's encoders the hardware ones follow
@@ -2834,6 +2873,10 @@ class Bridge:
             ma["feat"] = (p[0], p[1], p[2] == "1")
             if scr:
                 scr.update_encoders()
+        elif what == "groups":  # the encoder banks the selected fixture has
+            ma["groups"] = [g for g in str(val or "").split("|") if g]
+            if scr and scr.name == "fgroups":
+                scr.draw()
         elif what == "tabs":
             ma["tabs"] = [t for t in str(val or "").split("|") if t]
             if scr:
