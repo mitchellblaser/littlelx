@@ -248,7 +248,8 @@ class Runner:
                 err = "The bridge didn't let go of the controller."
             else:
                 try:
-                    lx.update_pi(self.cfg, path)
+                    LOG.part = "touchscreen"
+                    lx.update_pi(self.cfg, path, progress=lambda p: setattr(LOG, "progress", p))
                 except SystemExit as e:
                     err = str(e) if e.code not in (None, 0) else None
                 except Exception as e:

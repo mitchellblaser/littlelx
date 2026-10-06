@@ -3556,8 +3556,10 @@ class UpdateFailed(Exception):
     pass
 
 
-def update_pi(cfg, path):
-    """Send a littlelx-pi-update.zip to the touchscreen over USB."""
+def update_pi(cfg, path, progress=None, patience=16):
+    """Send a littlelx-pi-update.zip to the touchscreen over USB.
+    patience: seconds to wait for the touchscreen to answer (longer right
+    after the controller restarted: the touchscreen has to find it again)."""
     try:
         z = zipfile.ZipFile(path)
     except (OSError, zipfile.BadZipFile) as e:
@@ -3592,8 +3594,9 @@ def update_pi(cfg, path):
                             return line
             return None
 
-        def hello():
-            for _ in range(8):
+        def hello(patience=16):
+            end = time.time() + patience
+            while time.time() < end:
                 ser.send(">?")
                 h = wait([">HELLO"], 2)
                 if h:
@@ -3601,7 +3604,12 @@ def update_pi(cfg, path):
             return None
 
         print("Looking for the touchscreen...")
-        h = hello()
+        h = hello(patience)
+        if h and patience > 16:
+            # it has just come back: let it settle (it may still be finding the
+            # link speed), then make sure it still answers
+            time.sleep(3)
+            h = hello(patience)
         if not h:
             sys.exit("The touchscreen isn't answering. Is it powered and showing 'waiting for computer'?")
         parts = h.split()
@@ -3656,6 +3664,8 @@ def update_pi(cfg, path):
                             elif a > pos:
                                 pos, rewound, tries = a, False, 0
                                 print(f"\r  {(done + pos) * 100 // total:3d}%  {n:<28}", end="", flush=True)
+                                if progress:
+                                    progress((done + pos) * 100 // total)
                     else:
                         # older firmware: no repair possible, small window
                         pos, inflight = 0, []

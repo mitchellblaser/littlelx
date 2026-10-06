@@ -125,13 +125,27 @@ def install(lx, cfg, pkg, installed, port=None, force=False, progress=None, log=
             f"{pkg.parts['touchscreen']['version']}")
         if progress:
             progress("touchscreen", 0)
-        try:
-            lx.update_pi(cfg, pkg.parts["touchscreen"]["path"])
-        except SystemExit as e:
-            if e.code not in (None, 0):
-                problems.append(f"{NAMES['touchscreen']}: {e}")
-        except Exception as e:
-            problems.append(f"{NAMES['touchscreen']}: {e}")
+        # Right after the controller restarted, the touchscreen has been offline
+        # and needs a while to find the link again: be patient, and if it still
+        # doesn't go, wait and try once more (what pressing Install again does).
+        patience = 45 if "main" in todo else 16
+        for tryno in (1, 2):
+            err = None
+            try:
+                lx.update_pi(cfg, pkg.parts["touchscreen"]["path"], patience=patience,
+                             progress=(lambda p: progress("touchscreen", p)) if progress else None)
+            except SystemExit as e:
+                if e.code not in (None, 0):
+                    err = str(e)
+            except Exception as e:
+                err = str(e)
+            if not err:
+                break
+            if tryno == 1:
+                log(f"  {err}\n  Waiting a moment and trying again...")
+                time.sleep(5)
+            else:
+                problems.append(f"{NAMES['touchscreen']}: {err}")
     log("Done." if not problems else "Finished with problems:\n  " + "\n  ".join(problems))
     return problems
 
