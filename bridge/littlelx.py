@@ -72,7 +72,7 @@ def bridge_version():
 #   {"cmd": "... {d} ..."}               {d} = step per click, or {"page": 1}
 # Push actions also allow {"resolution": "Dimmer"}: toggle MA's Coarse/Fine.
 
-CONFIG_VERSION = 8
+CONFIG_VERSION = 9
 
 DEFAULTS = {
     "config_version": CONFIG_VERSION,
@@ -84,7 +84,14 @@ DEFAULTS = {
         "fader_interval": 0.025,  # s between messages per fader (MA lags if flooded)
         "fader_jump": 5,          # % moved that is sent at once (fast throws stay smooth)
         "fader_type": "i",        # how faders are sent; --test-faders picks it (see FADER_FORMATS)
+        "type": "ma3",            # "ma3", or "generic": plain OSC to anything else, at these:
+        "generic": {"fader": "/fader/{n}", "key": "/key/{n}", "encoder": "/encoder/{n}",
+                    "push": "/encoder/{n}/push", "button": "/button/{n}"},
     },
+    # Saved connections (the app's Connection tab); "profile" is the one in use,
+    # copied into "osc" above
+    "profiles": [],
+    "profile": "",
     "ma3": {
         "auto_install": True,     # put the littlelx code into MA3 over OSC
         "osc_line": 2,            # MA3 OSC line that SENDS to this computer (port 9000)
@@ -149,6 +156,10 @@ def load_config():
             save_config(cfg)
     else:
         save_config(cfg)
+    if not cfg.get("profiles"):  # the connection so far becomes the first profile
+        cfg["profiles"] = [profile_from_osc("grandMA3", cfg["osc"])]
+        cfg["profile"] = "grandMA3"
+        save_config(cfg)
     return cfg
 
 
@@ -196,6 +207,27 @@ def migrate(cfg):
             e["step"] = 1
             if e.get("push") in ({"key": "Clear"}, {"cmd": "Clear"}):
                 e["push"] = {"resolution": m.group(1)}
+
+
+PROFILE_KEYS = ("type", "host", "port", "prefix", "listen_port", "generic")
+
+
+def profile_from_osc(name, osc):
+    p = {"name": name}
+    p.update({k: copy.deepcopy(osc[k]) for k in PROFILE_KEYS if k in osc})
+    return p
+
+
+def use_profile(cfg, name):
+    """Make the named connection profile the one in use (cfg["osc"])."""
+    for p in cfg.get("profiles", []):
+        if p.get("name") == name:
+            for k in PROFILE_KEYS:
+                if k in p:
+                    cfg["osc"][k] = copy.deepcopy(p[k])
+            cfg["profile"] = name
+            return True
+    return False
 
 
 def save_config(cfg):
@@ -485,9 +517,12 @@ class Port:
             pass
 
 
-def connect(cfg, verbose=True):
-    """Open the Mega and wait for it to boot (opening the port resets it)."""
+def connect(cfg, verbose=True, stop=None):
+    """Open the Mega and wait for it to boot (opening the port resets it).
+    stop: returns True to give up (-> None), e.g. the app pausing the bridge."""
     while True:
+        if stop and stop():
+            return None
         path = find_port(cfg)
         if path:
             try:
@@ -498,6 +533,8 @@ def connect(cfg, verbose=True):
                         kind, src, line = events.get(timeout=0.2)
                     except queue.Empty:
                         kind = None
+                    if kind == "call":
+                        line()  # the app's request (see Bridge.call)
                     if kind == "mega" and src is p and line.startswith("HELLO littlelx-mega"):
                         print(f"Mega connected on {path}")
                         return p
@@ -513,7 +550,14 @@ def connect(cfg, verbose=True):
         elif verbose:
             print("Waiting for the controller to be plugged in...")
         verbose = False
-        time.sleep(2)
+        end = time.time() + 2
+        while time.time() < end and not (stop and stop()):
+            try:
+                kind, src, data = events.get(timeout=0.2)
+            except queue.Empty:
+                continue
+            if kind == "call":
+                data()
 
 
 # ------------------------------------------------- setup stored on the Mega
@@ -1510,14 +1554,24 @@ class Screen:
             self.tab_page += 1
             self.tab_paged = True
             self.show_tabs()
-        else:
+        elif not self.generic_button(act, 1):
             self.b.do_action(act, True)
+
+    def generic_button(self, act, value):
+        """Generic OSC profile: a touch button sends /button/<n> (except the ones
+        that switch the controller's own screens and pages)."""
+        buttons = self.b.cfg["touch_buttons"]
+        if not self.b.generic() or act not in buttons or "screen" in act or "page" in act:
+            return False
+        self.b.generic_send("button", buttons.index(act) + 1, value)
+        return True
 
     def on_release(self, wid):
         act = self.keymap.get(wid)
         if act and not any(k in act for k in ("keypad", "back", "encpage", "tab", "tabpage", "edit", "assign",
                                               "digit", "reset_keys", "entry", "vkey", "setv", "setpage", "probe")):
-            self.b.do_action(act, False)
+            if not self.generic_button(act, 0):
+                self.b.do_action(act, False)
 
     def local_key(self, k):
         """The command line, kept here and sent to MA on Please."""
@@ -1617,21 +1671,47 @@ class Bridge:
         self.pi_ready = False
         self.pi_heard = 0.0
         self.pi_proto = 0
+        self.pi_version = ""
+        self.raw_analog = {}                 # Mega analog channel -> last raw reading
+        self.hold = threading.Event()        # the app wants the port (set) ...
+        self.held = threading.Event()        # ... and has it (set by run)
+        self.quit = threading.Event()
         self.build_maps()
 
-        o = cfg["osc"]
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.rx = None
+        self.open_osc()
+
+    def open_osc(self):
+        """(Re)open OSC from cfg["osc"]: where to send, and the feedback port."""
+        o = self.cfg["osc"]
         self.dest = (o["host"], int(o["port"]))
         self.prefix = o["prefix"].rstrip("/")
+        port = int(o["listen_port"])
+        if self.rx and self.rx.getsockname()[1] == port:
+            return
+        if self.rx:
+            self.rx.close()  # its reader thread ends
+            self.rx = None
         try:
             rx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            rx.bind(("0.0.0.0", int(o["listen_port"])))
+            rx.bind(("0.0.0.0", port))
+            self.rx = rx
             start_thread(self.osc_reader, rx)
         except OSError as e:
-            print(f"Can't listen for MA feedback on port {o['listen_port']}: {e}")
+            print(f"Can't listen for MA feedback on port {port}: {e}")
             if getattr(e, "errno", None) in (48, 98, 10048):  # address in use (Mac, Linux, Windows)
                 print("  Another bridge is probably still running (e.g. the auto-start one):"
                       " it sends to MA too. Stop it first.")
+
+    def generic(self):
+        """Talking plain OSC to something that isn't MA (a connection profile)."""
+        return self.cfg["osc"].get("type", "ma3") == "generic"
+
+    def generic_send(self, what, n, value):
+        """Generic OSC: e.g. /fader/3 0.5, /key/7 1 (addresses from the profile)."""
+        addrs = self.cfg["osc"].get("generic") or DEFAULTS["osc"]["generic"]
+        self.osc(addrs.get(what, DEFAULTS["osc"]["generic"][what]).replace("{n}", str(n)), value)
 
     @staticmethod
     def osc_reader(rx):
@@ -1639,6 +1719,8 @@ class Bridge:
             try:
                 data, _ = rx.recvfrom(65536)
             except OSError:
+                if rx.fileno() < 0:
+                    return  # closed: the feedback port changed
                 continue  # Windows reports ICMP errors here; ignore
             for msg in osc_parse(data):
                 events.put(("osc", None, msg))
@@ -1713,6 +1795,9 @@ class Bridge:
     def encoder_push(self, i, down):
         """Click: type a value for the encoder's attribute (Coarse/Fine is on the
         screen). An encoder without an attribute (Page) does its push action."""
+        if self.generic():
+            self.generic_send("push", i + 1, 1 if down else 0)
+            return
         if self.encoder_attr(i) or self.following(i):
             if down and self.pi_ready and self.screen.name.startswith("entry"):
                 self.screen.encoder_click()
@@ -1839,8 +1924,12 @@ class Bridge:
         hist.append((now, value))
         while hist and now - hist[0][0] > self.ECHO_WINDOW:
             hist.pop(0)
-        addr, arg = fader_message(fmt, self.page, self.cfg["faders"][i]["exec"], value)
-        self.osc(addr, arg)
+        if self.generic():
+            self.generic_send("fader", i + 1, float(round(value / 100.0, 4)))
+            addr, arg = "fader", value
+        else:
+            addr, arg = fader_message(fmt, self.page, self.cfg["faders"][i]["exec"], value)
+            self.osc(addr, arg)
         if self.verbose:
             print(f"{time.strftime('%H:%M:%S')}.{int(now * 1000) % 1000:03d}  fader {i + 1}: {addr} {arg}")
 
@@ -1860,6 +1949,10 @@ class Bridge:
             return
         if not down and i not in self.keys_down:
             return  # its press went to Setup: MA never saw it
+        if self.generic():
+            self.keys_down.add(i) if down else self.keys_down.discard(i)
+            self.generic_send("key", i + 1, 1 if down else 0)
+            return
         if down:
             self.keys_down.add(i)
         else:
@@ -1956,6 +2049,7 @@ class Bridge:
             return
         kind, n, v = m.group(1), int(m.group(2)), int(m.group(3))
         if kind == "A":
+            self.raw_analog[n] = v
             i = self.analog.get(n)
             if i is not None:
                 f = self.cfg["hw"]["faders"][i]
@@ -1980,7 +2074,9 @@ class Bridge:
             d = self.encs[i].update(self.pins.get(e["a"], 1), self.pins.get(e["b"], 1))
             if d and e.get("reverse"):
                 d = -d
-            if d and self.pi_ready and self.screen.scroll_sets(d):
+            if d and self.generic():
+                self.generic_send("encoder", i + 1, d)
+            elif d and self.pi_ready and self.screen.scroll_sets(d):
                 pass  # scrolled the named values on the screen
             elif d and self.following(i):
                 e = self.ma_encoder(i)
@@ -2013,6 +2109,7 @@ class Bridge:
                 self.screen.w, self.screen.h = int(parts[3]), int(parts[4])
             self.pi_proto = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 1
             ver = parts[5] if len(parts) > 5 else "old"
+            self.pi_version = ver
             print(f"Touchscreen connected ({self.screen.w}x{self.screen.h}, firmware {ver})")
             if self.pi_proto < 3:
                 print("  Touchscreen firmware is out of date (no fader markers, unchecked link):"
@@ -2230,11 +2327,22 @@ class Bridge:
                     save_to_mega(self.cfg, self.ser, keep=True)
 
     # ---- main loop
+    def call(self, fn):
+        """Run fn on the bridge's thread (from the app's): safe with the port."""
+        events.put(("call", None, fn))
+
     def run(self):
         last_ping = last_status = last_refresh = 0
         started = time.time()
-        while True:
-            self.ser = connect(self.cfg)
+        while not self.quit.is_set():
+            if self.hold.is_set():  # the app has the port (touchscreen update)
+                self.held.set()
+                time.sleep(0.2)
+                continue
+            self.held.clear()
+            self.ser = connect(self.cfg, stop=lambda: self.hold.is_set() or self.quit.is_set())
+            if self.ser is None:
+                continue
             self.pi_ready = False
             self.pi_heard = 0.0
             try:
@@ -2253,11 +2361,18 @@ class Bridge:
             self.ser.send("?")
             self.to_pi("?")
             while True:
+                if self.hold.is_set() or self.quit.is_set():
+                    self.ser.close()
+                    self.ser = None
+                    self.pi_ready = False
+                    break
                 try:
                     kind, src, data = events.get(timeout=0.01)  # short: held fader values go out on time
                 except queue.Empty:
                     kind = None
-                if kind == "mega" and src is self.ser:
+                if kind == "call":
+                    data()
+                elif kind == "mega" and src is self.ser:
                     self.on_mega(data)
                 elif kind == "osc":
                     self.on_osc(*data)
@@ -2270,7 +2385,8 @@ class Bridge:
                 now = time.time()
                 self.flush_faders()
                 self.check_encoder_clicks(now)
-                if self.cfg.get("ma3", {}).get("auto_install", True) and now - self.ma_installed_at > 30:
+                if (self.cfg.get("ma3", {}).get("auto_install", True) and not self.generic()
+                        and now - self.ma_installed_at > 30):
                     if not self.ma_linked() and now - started > 4:
                         self.install_ma3()
                     elif (self.ma_linked() and self.ma["ver"] != self.ma_code_version()
