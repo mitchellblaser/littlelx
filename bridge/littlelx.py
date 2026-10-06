@@ -820,10 +820,11 @@ class Screen:
                 self.send(f"M {wid} {s['marker']}")
 
     # ---- layout
-    ENC_STRIP_H = 20  # main page: the two encoders, under the status bar
+    ENC_STRIP_H = 20  # the two encoders, small, under the status bar
+    STRIP_SCREENS = ("main", "keypad")
 
     def header_h(self):
-        strip = self.ENC_STRIP_H if self.name == "main" else 0
+        strip = self.ENC_STRIP_H if self.name in self.STRIP_SCREENS else 0
         return (54 if self.portrait else 30) + strip
 
     def mid_text(self):
@@ -838,7 +839,7 @@ class Screen:
     def header(self):
         w = self.w
         page = f"Page {self.b.page}"
-        strip = self.name == "main"
+        strip = self.name in self.STRIP_SCREENS
         sy = 30  # the encoder strip sits right under the status bar
         if strip:
             half = w // 2
