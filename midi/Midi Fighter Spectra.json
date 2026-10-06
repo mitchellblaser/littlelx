@@ -1,7 +1,7 @@
 {
   "name": "Midi Fighter Spectra",
   "match": ["Midi Fighter Spectra", "Spectra"],
-  "about": "DJ TechTools Midi Fighter Spectra: 4 banks of 16 buttons. Bank 1 columns = executors 1-4 (rows from the bottom: 101-104, 201-204, 301-304, 401-404), bank 2 = 5-8, bank 3 = 9-12, bank 4 = 13-15. Buttons are dim in their sequence's colour (nearest of the Spectra's 10) and bright while it runs; empty ones are dark.",
+  "about": "DJ TechTools Midi Fighter Spectra: 4 banks of 16 buttons. Bank 1 columns = executors 1-4 (rows from the bottom: 101-104, 201-204, 301-304, 401-404), bank 2 = 5-8, bank 3 = 9-12, bank 4 = 13-15. Buttons are dim in their sequence's colour (nearest of the Spectra's 10) and bright while it runs; empty ones are dark. With the RGB firmware patch (spectra_rgb.hex) the rings show the sequence's exact colour instead (found by itself).",
   "controls": [
     {
       "group": "buttons",
@@ -106,5 +106,14 @@
       {"exec": 415},
       {}
     ]
+  },
+  "rgb_sysex": {
+    "header": [0, 1, 121, 8],
+    "probe": 127,
+    "records": 30,
+    "base": 36,
+    "dim": 0.25,
+    "press": "#303030",
+    "wait": 1.0
   }
 }

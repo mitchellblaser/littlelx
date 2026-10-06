@@ -426,7 +426,12 @@ default layout:
   13-15. Buttons are dim in their sequence's colour and bright while it runs;
   empty ones are dark. Over MIDI the Spectra has 10 colours (each bright or
   dim), so a sequence gets the nearest of them; its smooth rainbow is its own
-  sleep animation, not something MIDI can set. Set to another MIDI channel in
+  sleep animation, not something MIDI can set - unless the Spectra runs the
+  RGB firmware patch (`spectra_rgb.hex`): the bridge finds that by itself (it
+  asks the Spectra when it's plugged in) and then shows each sequence's exact
+  colour, dim when off and bright while it runs. The patch keeps colours in
+  RAM only, but a "send to device" from the Midi Fighter Utility saves what's
+  showing: unplug and replug the Spectra first. Set to another MIDI channel in
   the Midi Fighter Utility? The bridge notices on the first press and
   remembers it.
 

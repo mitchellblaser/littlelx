@@ -110,7 +110,7 @@ class Backend:
     def open_input(self, name, callback):
         port = rtmidi.MidiIn()
         port.open_port(self.inputs().index(name))
-        port.ignore_types(sysex=True, timing=True, active_sense=True)
+        port.ignore_types(sysex=False, timing=True, active_sense=True)  # SysEx: device replies
         port.set_callback(lambda ev, _: callback(ev[0]))
         return port
 
@@ -195,18 +195,22 @@ class _PiPort:
 
 def parse(state, data):
     """MIDI bytes (as they come, in pieces) -> complete messages; running status
-    kept, SysEx and real-time bytes skipped."""
+    kept, real-time bytes skipped, a SysEx is one message (F0 ... F7)."""
     out = []
     for byte in data:
         if byte >= 0xF8:          # real-time: one byte, anywhere
             continue
         if byte == 0xF0:
-            state["sysex"] = True
+            state["sysex"], state["sx"] = True, [0xF0]
             continue
         if state["sysex"]:
-            if byte == 0xF7 or byte >= 0x80:
-                state["sysex"] = False
-            if byte == 0xF7 or byte < 0x80:
+            if byte < 0x80:
+                if len(state["sx"]) < 300:
+                    state["sx"].append(byte)
+                continue
+            state["sysex"] = False
+            if byte == 0xF7:
+                out.append(state["sx"] + [0xF7])
                 continue
         if byte >= 0x80:
             state["status"], state["data"] = (byte if byte < 0xF0 else 0), []
@@ -260,6 +264,10 @@ class Device:
         self.in_name, self.out_name = in_name, out_name
         self.inp = self.out = None
         self.backend = None     # where it is plugged in (the computer / the controller)
+        self.rgb = None         # full colours by SysEx: None = not known yet
+        self.rgb_asked = 0.0
+        self.rgb_sent = {}      # pad index -> (off colour, on colour) sent
+        self.rgb_queue, self.rgb_notes = {}, []
         self.leds = {}          # (status, number) -> velocity last sent
         self.lookup = {}        # (kind, channel 0-15, number) -> (group, index)
         self.loose = {}         # (kind, number) -> (group, index): any channel
@@ -298,11 +306,93 @@ class Device:
             except Exception:
                 pass
 
+    # ---- full colours by SysEx (e.g. a Spectra with the RGB firmware patch):
+    # "rgb_sysex": {"header": [0, 1, 121, 8], "probe": 127, "records": 30,
+    #               "base": 36, "dim": 0.25, "press": "#303030", "wait": 1.0}
+    # F0 <header> <target> (<idx> <r> <g> <b>)... F7, target 0 = off colour,
+    # 1 = on colour (velocity 127 / pressed); probe F0 <header> 7F F7 -> version.
+    def ask_rgb(self):
+        sx = self.spec.get("rgb_sysex")
+        self.rgb = None
+        self.rgb_asked = 0.0
+        if sx:
+            self.rgb_asked = time.time()
+            self.send([0xF0] + list(sx["header"]) + [int(sx.get("probe", 127)), 0xF7])
+
+    def rgb_pending(self):
+        sx = self.spec.get("rgb_sysex")
+        if not sx or self.rgb is not None or not getattr(self, "rgb_asked", 0):
+            return False
+        if time.time() - self.rgb_asked > float(sx.get("wait", 1.0)):
+            self.rgb = False  # no answer: the stock firmware
+            print(f"MIDI: {self.name}: standard colours")
+            return False
+        return True
+
+    def on_sysex(self, msg):
+        sx = self.spec.get("rgb_sysex")
+        h = list(sx["header"]) if sx else None
+        if h and msg[1:1 + len(h)] == h and len(msg) > len(h) + 2 and msg[1 + len(h)] == int(sx.get("probe", 127)):
+            first = self.rgb is not True
+            self.rgb = True
+            if first:
+                print(f"MIDI: {self.name}: full colours (firmware patch version {msg[2 + len(h)]})")
+                self.leds = {}
+            return first
+        return False
+
+    def light_rgb(self, c, led, i, state, color):
+        sx = self.spec["rgb_sysex"]
+        number = int(c["numbers"][i])
+        idx = number - int(sx.get("base", 36))
+        if not 0 <= idx < 128:
+            return
+        full = rgb(color) if color and rgb(color) and rgb(color) != (0, 0, 0) else None
+        if state == "off":
+            off_c, on_c = (0, 0, 0), rgb(sx.get("press", "#303030"))
+        else:
+            if not full:
+                how = led.get(state) if isinstance(led.get(state), dict) else {}
+                full = rgb(how.get("default", "#ffffff"))
+            dim = float(sx.get("dim", 0.25))
+            off_c, on_c = tuple(int(v * dim) for v in full), full
+        seven = lambda col: tuple(v >> 1 for v in col)  # noqa: E731 - the device takes 7-bit colours
+        off_c, on_c = seven(off_c), seven(on_c)
+        prev = self.rgb_sent.get(idx, (None, None))
+        if prev[0] != off_c:
+            self.rgb_queue.setdefault(0, []).append((idx,) + off_c)
+        if prev[1] != on_c:
+            self.rgb_queue.setdefault(1, []).append((idx,) + on_c)
+        self.rgb_sent[idx] = (off_c, on_c)
+        ch = self.channels.get(c["group"], int(led.get("channel", c.get("channel", 1))) - 1)
+        vel = 127 if state == "on" else 0
+        key = (number,)
+        if self.leds.get(key) != (0x90 | ch, vel) or prev != (off_c, on_c):
+            self.leds[key] = (0x90 | ch, vel)
+            self.rgb_notes.append((0x90 | ch, number, vel))
+
+    def flush(self):
+        """Colours first (SysEx, up to "records" per message), then the notes."""
+        if not getattr(self, "rgb_queue", None) and not getattr(self, "rgb_notes", None):
+            return
+        sx = self.spec.get("rgb_sysex") or {}
+        n = int(sx.get("records", 30))
+        for target, recs in sorted(self.rgb_queue.items()):
+            for off in range(0, len(recs), n):
+                body = [b for r in recs[off:off + n] for b in r]
+                self.send([0xF0] + list(sx["header"]) + [target] + body + [0xF7])
+        for note in self.rgb_notes:
+            self.send(note)
+        self.rgb_queue, self.rgb_notes = {}, []
+
     def light(self, group, i, state, color):
         """state: "off" | "idle" | "on"; color: the sequence colour (hex) or None."""
         c = self.control(group)
         led = (self.spec.get("leds") or {}).get(c.get("led")) if c else None
         if not led:
+            return
+        if self.rgb and self.spec.get("rgb_sysex"):
+            self.light_rgb(c, led, i, state, color)
             return
         number = int(c["numbers"][i])
         how = led.get(state) if state != "off" else "off"
@@ -332,6 +422,7 @@ class Device:
             if c.get("led"):
                 for i in range(len(c.get("numbers", []))):
                     self.light(c["group"], i, "off", None)
+        self.flush()
 
     def reset_channel(self, group, ch, value=0):
         """Hand group's lights on channel ch (and its animation channel, if the
@@ -355,6 +446,7 @@ class Device:
                 for n in c.get("numbers", []):
                     self.send((0x90 | (k & 15), int(n), 0))
         self.all_off()
+        self.ask_rgb()
 
     def close(self):
         for c in self.spec.get("controls", []):  # give the lights back to the device
@@ -525,6 +617,10 @@ class Midi:
     def on_message(self, dev, msg):
         if not msg:
             return
+        if msg[0] == 0xF0:
+            if dev.on_sysex(msg):
+                self.dirty = True  # it can do full colours: show them
+            return
         st, kind = msg[0], msg[0] & 0xF0
         ch = st & 15
         if kind in (0x90, 0x80) and len(msg) >= 3:
@@ -602,12 +698,16 @@ class Midi:
 
     def refresh(self):
         for dev in self.devices.values():
+            if dev.rgb_pending():
+                self.dirty = True  # still asking whether it has full colours
+                continue
             for c in dev.spec.get("controls", []):
                 if not c.get("led"):
                     continue
                 for i in range(len(c.get("numbers", []))):
                     state, color = self.b.item_state(dev.item(c["group"], i))
                     dev.light(c["group"], i, state, color)
+            dev.flush()
 
     def close(self):
         for d in self.devices.values():
