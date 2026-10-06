@@ -91,6 +91,10 @@ jobs:
           pyinstaller --windowed --name littlelx --paths bridge --hidden-import megaflash --add-data "ma3/littlelx.lua:ma3" --add-data "profiles:profiles" --add-data "firmware:firmware" --add-data "VERSION:." bridge/app.py
           # menu bar only: no Dock icon
           plutil -insert LSUIElement -bool true dist/littlelx.app/Contents/Info.plist
+          # that edit breaks PyInstaller's signature, and macOS calls an app with a
+          # broken signature "damaged": sign it again (ad hoc) and check
+          codesign --force --deep --sign - dist/littlelx.app
+          codesign --verify --deep --strict --verbose=2 dist/littlelx.app
           ditto -c -k --keepParent dist/littlelx.app littlelx-mac.zip
       - uses: actions/upload-artifact@v4
         with:

@@ -238,8 +238,12 @@ there, switches profiles, and opens the littlelx window:
 Closing the window keeps it running; **Quit** is in the tray / menu bar menu.
 
 **Get it:** the GitHub build (Actions) makes `littlelx-app.exe` (Windows, in
-`littlelx-windows`) and `littlelx.app` (macOS, `littlelx-mac.zip`; the first
-time, right-click it and choose Open - it isn't signed). From the source:
+`littlelx-windows`) and `littlelx.app` (macOS, `littlelx-mac.zip`). It isn't
+signed with an Apple developer account, so macOS won't open it by itself the
+first time: right-click it and choose Open, or after a refused open go to
+System Settings > Privacy & Security and click "Open Anyway". If macOS calls it
+"damaged", run `xattr -cr littlelx.app` in Terminal (in the folder it's in) and
+open it again. From the source:
 
     pip install pyside6 pyserial
     python3 bridge/app.py
