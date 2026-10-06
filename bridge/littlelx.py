@@ -828,7 +828,9 @@ class Screen:
 
     def mid_text(self):
         b = self.b
-        if b.ma_linked():
+        if self.cmdline:  # the line being built here
+            return "> " + self.cmdline
+        if b.ma_linked():  # else whatever is on MA's own line (typed at the desk)
             line = b.ma["busy"] or b.ma["cmdline"]
             return "> " + line if line else ">"
         return b.last_cmd
@@ -1389,7 +1391,7 @@ class Screen:
                   colors=(bg, C_CMD if waiting else C_TEXT, C_WAIT if waiting else bar))
 
     def keypad_text(self):
-        if self.b.ma_linked():
+        if not self.cmdline and self.b.ma_linked():
             return (self.b.ma["busy"] or self.b.ma["cmdline"]) + "_"
         return self.cmdline + "_"
 
@@ -1517,7 +1519,7 @@ class Screen:
             self.b.do_action(act, False)
 
     def local_key(self, k):
-        """Command line kept here when MA isn't linked (sent on Please)."""
+        """The command line, kept here and sent to MA on Please."""
         if k == "<-":
             self.cmdline = self.cmdline.rstrip()
             self.cmdline = self.cmdline[:self.cmdline.rfind(" ") + 1] if " " in self.cmdline else ""
@@ -1763,27 +1765,13 @@ class Bridge:
             print(f"MA: {arg}")
 
     def ma_key(self, k):
-        """A console key: typed into MA's real command line when linked."""
-        if not self.ma_linked():
-            self.screen.local_key(k)
-            return
-        verb = {"Please": "please", "Clear": "clear", "<-": "back"}.get(k)
-        self.ma_plugin(verb or f"type {k}")
-        # Show the expected result straight away; MA's real line follows.
-        t = self.ma["cmdline"]
-        if k in ("Please", "Clear"):
-            t = ""
-        elif k == "<-":
-            t = re.sub(r"\s*\S+\s*$", "", t)
-            t = t + " " if t else ""
-        else:
-            numeric = re.fullmatch(r"[\d.]+", k) is not None
-            if t and not t.endswith(" ") and not numeric:
-                t += " "
-            t += k + ("" if numeric else " ")
-        self.ma["cmdline"] = t
-        if self.pi_ready:
-            self.screen.update_cmdline()
+        """A console key. The command line is kept here and sent to MA whole on
+        Please: typing keystrokes into MA (as before) hit its keyboard shortcuts
+        and whatever had focus on the onPC. MA's own command line shows it too
+        when its version allows (the plugin sets the text, no keystrokes)."""
+        self.screen.local_key(k)
+        if self.ma_linked():
+            self.ma_plugin("show " + self.screen.cmdline.strip())
 
     def ma_code_version(self):
         """Short fingerprint of the MA code this bridge would install."""

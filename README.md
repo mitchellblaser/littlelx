@@ -187,12 +187,11 @@ can also be imported as a normal plugin if you prefer; tap it to start or stop.)
 * **Status keys.** Highlight and Blind light up while they're on in MA, and
   executor buttons light up while running. Any touch button can light up for
   `"state": "highlight" | "lowlight" | "solo" | "blind"`.
-* **MA's real command line.** The keypad and `{"key": …}` buttons type into MA's
-  own command line, exactly like pressing the console keys, and the screen shows
-  MA's actual command line back. What you see is always MA's syntax. (MA won't
-  accept typing while a popup is open on its screen; the controller says so.)
-* Without the link (e.g. no second OSC line), everything still works as
-  before: commands are built on the controller and sent on Please.
+* **Command line.** The keypad and `{"key": …}` buttons build the command on
+  the controller (shown on its screen, and in MA's own command line where MA
+  allows it) and send it whole on Please. Nothing is typed into MA, so MA's
+  keyboard shortcuts and whatever has focus on the onPC don't matter. With the
+  line empty, the screen shows MA's own command line (typed at the desk).
 
 ### 7. Run it
 
@@ -245,8 +244,8 @@ key on the controller (or tap it in the list) and pick a function, or
 **Executor...** to type an executor number. Saved straight away, on the
 controller too, so the keys travel with it to any computer.
 
-Actions are one of `{"exec": 201}`, `{"key": "Store"}` (a console key typed into
-MA's command line; `"Please"`, `"Clear"` and `"<-"` act on the line), `{"cmd": "Go+"}`
+Actions are one of `{"exec": 201}`, `{"key": "Store"}` (a console key on the command
+line; `"Please"`, `"Clear"` and `"<-"` act on the line), `{"cmd": "Go+"}`
 (a command run right away), `{"page": 1}`, `{"screen": "keypad"}` or
 `{"resolution": "Dimmer"}` (toggle MA's Coarse/Fine for that attribute). Encoders
 take `{"attribute": "Pan", "step": 1}` (follows MA's Coarse/Fine), `{"page": 1}` or

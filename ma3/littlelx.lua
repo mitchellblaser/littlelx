@@ -8,11 +8,9 @@
 -- Lua keyword; see install_ma3() in bridge/littlelx.py). It can also be
 -- imported as an ordinary plugin and tapped to start/stop.
 --
--- Called with an argument it acts on MA's command line:
---   "type Store"   type a keyword (like pressing the key)
---   "please"       execute the command line
---   "clear"        clear the line, or Clear if it's empty
---   "back"         remove the last word
+-- Called with an argument:
+--   "show Store 1" show the bridge's command line in MA's (it is kept and
+--                  executed by the bridge: no keystrokes into MA)
 --   "page 3"       select executor page 3
 --   "res Dimmer"   toggle MA's encoder resolution for an attribute (Coarse/Fine)
 --   "probe"        print what this MA version's Lua offers (encoder diagnostics)
@@ -689,22 +687,6 @@ end
 
 -- ---- acting on the command line --------------------------------------
 
-local function key(name)
-	Keyboard(1, "press", name)
-	Keyboard(1, "release", name)
-end
-
-local function typetext(s)
-	for c in s:gmatch(".") do
-		Keyboard(1, "char", c)
-	end
-end
-
-local function replace_line(s) -- clear the command line, then type s
-	if #cmdtext() > 0 then key("Escape") end
-	typetext(s)
-end
-
 local function act(arg)
 	local verb, rest = arg:match("^(%S+)%s*(.*)$")
 	verb = (verb or ""):lower()
@@ -743,32 +725,17 @@ local function act(arg)
 		send("res/" .. rest, "f", r)
 		return
 	end
-	-- Typing goes to whatever has keyboard focus: don't type into popups.
-	if GetTopModal and GetTopModal() then
-		send("busy", "s", "close the popup on MA's screen first")
-		return
-	end
-	local t = cmdtext()
-	if verb == "type" then
-		local needs_space = #t > 0 and not t:match("%s$") and not rest:match("^[%d%.]")
-		typetext((needs_space and " " or "") .. rest)
-		if not rest:match("^[%d%.]+$") then typetext(" ") end -- keywords end with a space
-	elseif verb == "please" then
-		if #t:gsub("%s", "") > 0 then
-			key("Escape")
-			Cmd(t)
+	if verb == "show" then
+		-- The bridge keeps the command line and sends it whole on Please (typing
+		-- keystrokes into MA hit shortcuts and whatever had focus). Show it in
+		-- MA's command line too, if this MA lets us set the text directly.
+		local t = rest
+		pcall(function() CmdObj().CmdText = t end)
+		local now = cmdtext()
+		if now ~= last["cmd"] then
+			last["cmd"] = now
+			send("cmdline", "s", now)
 		end
-	elseif verb == "clear" then
-		if #t > 0 then key("Escape") else Cmd("Clear") end
-	elseif verb == "back" then
-		local shorter = t:gsub("%s*%S+%s*$", "")
-		replace_line(#shorter > 0 and (shorter .. " ") or "")
-	end
-	-- report the new command line now rather than on the next tick
-	local now = cmdtext()
-	if now ~= t then
-		last["cmd"] = now
-		send("cmdline", "s", now)
 	end
 end
 
