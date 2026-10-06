@@ -308,9 +308,13 @@ class StatusTab(QWidget):
         bad = lambda t: f"<span style='color:#c0392b'>{t}</span>"  # noqa: E731
         lines = []
         for d in self.runner.devices():
+            where = {"controller": " on the controller", "computer": " on this computer"}.get(d.get("where"), "")
             if d["kind"] == "midi":
                 text = (f"MIDI: {d['name']} " + ("<span style='color:gray'>(no definition: not used)</span>"
-                                                  if d.get("unknown") else ok("connected")))
+                                                  if d.get("unknown") else ok("connected" + where)))
+            elif d["kind"] == "module":
+                text = f"Module: {d['name']} " + ok("connected" + where) + \
+                    " <span style='color:gray'>(not supported yet)</span>"
             elif d["connected"]:
                 extra = ", ".join(x for x in (d.get("port"), d.get("firmware") and f"firmware {d['firmware']}") if x)
                 text = f"{d['name']}: " + ok("connected") + (f" ({extra})" if extra else "")
@@ -573,11 +577,12 @@ class FirmwareTab(QWidget):
                 inst_text = inst or ("not connected" if part == "touchscreen" else "-")
             for c, t in enumerate((fwpack.NAMES[part], inst_text, new or "-", action)):
                 self.table.setItem(r, c, QTableWidgetItem(t))
-        others = [d for d in self.runner.devices() if d["kind"] == "midi"]
+        others = [d for d in self.runner.devices() if d["kind"] in ("midi", "module")]
         self.last_others = [d["port"] for d in others]
         self.table.setRowCount(len(rows) + len(others))
         for r, d in enumerate(others, len(rows)):
-            what = "MIDI device: no definition" if d.get("unknown") else "MIDI device"
+            what = ("Module (not supported yet)" if d["kind"] == "module" else
+                    "MIDI device: no definition" if d.get("unknown") else "MIDI device")
             for c, t in enumerate((d["name"], what, "-", "nothing to install")):
                 self.table.setItem(r, c, QTableWidgetItem(t))
         todo = [r for r in rows if r[3] == "install"]
@@ -594,7 +599,8 @@ class FirmwareTab(QWidget):
             self.msg.setText({"main": "Installing: controller...", "touchscreen": "Installing: touchscreen..."}
                              .get(part, "Installing..."))
         elif (self.runner.installed() != self.last_have or
-              [d["port"] for d in self.runner.devices() if d["kind"] == "midi"] != getattr(self, "last_others", [])):
+              [d["port"] for d in self.runner.devices() if d["kind"] in ("midi", "module")]
+              != getattr(self, "last_others", [])):
             self.show_plan()
 
     def install_file(self):

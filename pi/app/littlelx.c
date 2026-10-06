@@ -44,6 +44,12 @@
  *     CALSTART                            calibration screen is up (answer to CAL)
  *     CALD a b c d e f                    calibration result; repeated every second
  *                                         until the computer answers with K (saved)
+ *
+ *   USB devices (MIDI controllers, littlelx modules) on the Pi's USB ports
+ *   are passed through, see "USB devices" below:
+ *     panel -> computer: USB + <id> midi|serial <name> / USB - <id>,
+ *                        MI <id> <hex> (MIDI bytes), MD <id> <text> (a module's line)
+ *     computer -> panel: USB ? (list them again), MO <id> <hex>, MW <id> <text>
  */
 #define _GNU_SOURCE
 #include <dirent.h>
@@ -75,6 +81,7 @@
 
 static void klog(const char *msg);
 static void send_hello(void);
+static void usb_line(char *line);
 int set_baud(int fd, int baud); /* baud.c */
 
 static const int bauds[] = { 250000, 500000 };
@@ -950,6 +957,8 @@ static void handle_line(char *line)
 	} else if (!strncmp(line, "BG ", 3)) {
 		screen_bg = hex(line + 3);
 		mark_all();
+	} else if (!strncmp(line, "USB ", 4) || !strncmp(line, "MO ", 3) || !strncmp(line, "MW ", 3)) {
+		usb_line(line);
 	} else if (!strncmp(line, "UPD ", 4)) {
 		upd_line(line + 4);
 	} else if (!strcmp(line, "CAL")) {
@@ -1017,6 +1026,227 @@ static void handle_line(char *line)
 			   &cal[3], &cal[4], &cal[5]) == 6)
 			cal_valid = 1;
 		cal_unsaved = 0; /* the computer has (and stored) a calibration */
+	}
+}
+
+/* ------------------------------------------------------------ USB devices
+ *
+ * MIDI controllers (USB MIDI class: /dev/snd/midiC*D*) and littlelx modules
+ * (USB serial: /dev/ttyACM*, /dev/ttyUSB*) plugged into the Pi are handed to
+ * the computer, which decides what they do. Looked for once a second, so they
+ * can be plugged in and out at any time.
+ */
+#define MAXUSB 8
+typedef struct {
+	int fd, id;
+	char kind; /* 'm' midi, 's' serial */
+	char path[512], name[64];
+	char buf[200];
+	int len;
+} usbdev_t;
+static usbdev_t usbd[MAXUSB];
+static int usb_ids;
+
+static const char *devdir(void) { return getenv("LLX_DEVDIR") ? getenv("LLX_DEVDIR") : "/dev"; }
+static const char *sysdir(void) { return getenv("LLX_SYSDIR") ? getenv("LLX_SYSDIR") : "/sys"; }
+
+static void read_first_line(const char *path, char *out, int n)
+{
+	FILE *f = fopen(path, "r");
+	if (!f)
+		return;
+	if (fgets(out, n, f))
+		out[strcspn(out, "\r\n")] = 0;
+	fclose(f);
+}
+
+static void usb_announce(usbdev_t *u)
+{
+	send_line("USB + %d %s %s", u->id, u->kind == 'm' ? "midi" : "serial", u->name);
+}
+
+static void usb_close(usbdev_t *u)
+{
+	if (u->fd < 0)
+		return;
+	close(u->fd);
+	u->fd = -1;
+	send_line("USB - %d", u->id);
+	char msg[120];
+	snprintf(msg, sizeof(msg), "usb gone: %s", u->name);
+	klog(msg);
+}
+
+static void usb_open(const char *path, char kind, const char *name)
+{
+	for (int i = 0; i < MAXUSB; i++)
+		if (usbd[i].fd >= 0 && !strcmp(usbd[i].path, path))
+			return; /* already open */
+	usbdev_t *u = NULL;
+	for (int i = 0; i < MAXUSB && !u; i++)
+		if (usbd[i].fd < 0)
+			u = &usbd[i];
+	if (!u)
+		return;
+	int fd = open(path, O_RDWR | O_NOCTTY | O_NONBLOCK | O_CLOEXEC);
+	if (fd < 0)
+		return;
+	if (kind == 's') { /* modules talk text lines at 115200 */
+		struct termios t;
+		if (!tcgetattr(fd, &t)) {
+			cfmakeraw(&t);
+			cfsetispeed(&t, B115200);
+			cfsetospeed(&t, B115200);
+			t.c_cflag |= CLOCAL | CREAD;
+			tcsetattr(fd, TCSANOW, &t);
+		}
+	}
+	memset(u, 0, sizeof(*u));
+	u->fd = fd;
+	u->id = ++usb_ids;
+	u->kind = kind;
+	snprintf(u->path, sizeof(u->path), "%s", path);
+	snprintf(u->name, sizeof(u->name), "%s", name && *name ? name : "USB device");
+	for (char *c = u->name; *c; c++) /* one line, printable */
+		if ((unsigned char)*c < 32 || *c == '*')
+			*c = ' ';
+	usb_announce(u);
+	char msg[120];
+	snprintf(msg, sizeof(msg), "usb: %s", u->name);
+	klog(msg);
+}
+
+static void usb_scan(void)
+{
+	struct stat st;
+	for (int i = 0; i < MAXUSB; i++) /* unplugged? */
+		if (usbd[i].fd >= 0 && stat(usbd[i].path, &st))
+			usb_close(&usbd[i]);
+	char dir[200], path[512], sys[600], name[64];
+	snprintf(dir, sizeof(dir), "%s/snd", devdir());
+	DIR *d = opendir(dir);
+	struct dirent *e;
+	while (d && (e = readdir(d))) {
+		int card, dev;
+		if (sscanf(e->d_name, "midiC%dD%d", &card, &dev) != 2)
+			continue;
+		snprintf(path, sizeof(path), "%s/%s", dir, e->d_name);
+		name[0] = 0; /* the USB product name, as the computer would show it */
+		snprintf(sys, sizeof(sys), "%s/class/sound/card%d/device/../product", sysdir(), card);
+		read_first_line(sys, name, sizeof(name));
+		if (!name[0]) {
+			snprintf(sys, sizeof(sys), "/proc/asound/card%d/id", card);
+			read_first_line(sys, name, sizeof(name));
+		}
+		usb_open(path, 'm', name);
+	}
+	if (d)
+		closedir(d);
+	d = opendir(devdir());
+	while (d && (e = readdir(d))) {
+		if (strncmp(e->d_name, "ttyACM", 6) && strncmp(e->d_name, "ttyUSB", 6))
+			continue;
+		snprintf(path, sizeof(path), "%s/%s", devdir(), e->d_name);
+		name[0] = 0;
+		snprintf(sys, sizeof(sys), "%s/class/tty/%s/device/../product", sysdir(), e->d_name);
+		read_first_line(sys, name, sizeof(name));
+		if (!name[0]) {
+			snprintf(sys, sizeof(sys), "%s/class/tty/%s/device/../../product", sysdir(), e->d_name);
+			read_first_line(sys, name, sizeof(name));
+		}
+		usb_open(path, 's', name);
+	}
+	if (d)
+		closedir(d);
+}
+
+static void usb_read(usbdev_t *u)
+{
+	unsigned char tmp[256];
+	int n = read(u->fd, tmp, sizeof(tmp));
+	if (n < 0 && (errno == EAGAIN || errno == EINTR))
+		return;
+	if (n <= 0) {
+		usb_close(u);
+		return;
+	}
+	if (u->kind == 'm') {
+		for (int off = 0; off < n; off += 48) { /* short lines: the Mega relays 160 bytes */
+			char hex[100];
+			int k = 0;
+			for (int i = off; i < n && i < off + 48; i++)
+				k += sprintf(hex + k, "%02x", tmp[i]);
+			send_line("MI %d %s", u->id, hex);
+		}
+		return;
+	}
+	for (int i = 0; i < n; i++) {
+		char c = tmp[i];
+		if (c == '\r')
+			continue;
+		if (c == '\n') {
+			u->buf[u->len] = 0;
+			if (u->len)
+				send_line("MD %d %s", u->id, u->buf);
+			u->len = 0;
+		} else if (u->len < 140 && (unsigned char)c >= 32) {
+			u->buf[u->len++] = c;
+		}
+	}
+}
+
+static usbdev_t *usb_by_id(int id)
+{
+	for (int i = 0; i < MAXUSB; i++)
+		if (usbd[i].fd >= 0 && usbd[i].id == id)
+			return &usbd[i];
+	return NULL;
+}
+
+static void usb_write(usbdev_t *u, const void *data, int n)
+{
+	const char *p = data;
+	while (n > 0) {
+		int r = write(u->fd, p, n);
+		if (r < 0 && errno == EAGAIN) {
+			usleep(1000);
+			continue;
+		}
+		if (r <= 0)
+			return;
+		p += r;
+		n -= r;
+	}
+}
+
+static void usb_line(char *line)
+{
+	if (!strncmp(line, "USB ?", 5)) {
+		for (int i = 0; i < MAXUSB; i++)
+			if (usbd[i].fd >= 0)
+				usb_announce(&usbd[i]);
+		send_line("USB .");
+		return;
+	}
+	char *rest;
+	int id = (int)strtol(line + 3, &rest, 10);
+	usbdev_t *u = usb_by_id(id);
+	if (!u || *rest != ' ')
+		return;
+	rest++;
+	if (line[1] == 'O' && u->kind == 'm') { /* MO id hex */
+		unsigned char out[128];
+		int n = 0;
+		for (char *h = rest; h[0] && h[1] && n < (int)sizeof(out); h += 2) {
+			unsigned v;
+			if (sscanf(h, "%2x", &v) != 1)
+				break;
+			out[n++] = v;
+		}
+		usb_write(u, out, n);
+	} else if (line[1] == 'W' && u->kind == 's') { /* MW id text */
+		usb_write(u, rest, strlen(rest));
+		usb_write(u, "\n", 1);
 	}
 }
 
@@ -1331,22 +1561,32 @@ static int app(void)
 	}
 	mark_all();
 	flush();
+	for (int i = 0; i < MAXUSB; i++)
+		usbd[i].fd = -1;
 
 	for (;;) {
-		struct pollfd p[2];
+		struct pollfd p[2 + MAXUSB];
+		usbdev_t *pu[2 + MAXUSB];
 		int np = 0;
 		if (tty >= 0)
 			p[np++] = (struct pollfd){ .fd = tty, .events = POLLIN };
 		if (touch >= 0)
 			p[np++] = (struct pollfd){ .fd = touch, .events = POLLIN };
+		for (int i = 0; i < MAXUSB; i++)
+			if (usbd[i].fd >= 0) {
+				pu[np] = &usbd[i];
+				p[np++] = (struct pollfd){ .fd = usbd[i].fd, .events = POLLIN };
+			}
 		poll(p, np, 250);
 		for (int i = 0; i < np; i++) {
-			if (!(p[i].revents & POLLIN))
+			if (!(p[i].revents & (POLLIN | POLLERR | POLLHUP)))
 				continue;
 			if (p[i].fd == tty)
 				read_tty();
-			else
+			else if (p[i].fd == touch)
 				read_touch();
+			else
+				usb_read(pu[i]);
 		}
 
 		long long t = now_ms();
@@ -1357,6 +1597,7 @@ static int app(void)
 				tty = open_tty(ttyp);
 			if (touch < 0)
 				touch = open_touch();
+			usb_scan();
 		}
 		if (t - last_rx > 2500 && t - last_hello > 2000) {
 			send_hello();

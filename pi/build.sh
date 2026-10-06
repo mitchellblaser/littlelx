@@ -64,7 +64,7 @@ K="$WORK/linux"
 KO="$WORK/kout"
 KMAKE=(make -C "$K" ARCH=arm CROSS_COMPILE="$CROSS" -j"$JOBS")
 # Rebuild the kernel only when something that goes into it changed.
-KSTAMP="$(cat "$HERE/kernel.fragment" "$WORK/initramfs.list" | sha256sum | cut -c1-16)-$KERNEL_COMMIT"
+KSTAMP="$(cat "$HERE/kernel.fragment" "$WORK/initramfs.list" "$HERE/build.sh" | sha256sum | cut -c1-16)-$KERNEL_COMMIT"
 if [ -f "$KO/zImage" ] && [ "$(cat "$KO/stamp" 2>/dev/null)" = "$KSTAMP" ]; then
 	echo "(unchanged, not rebuilt)"
 else
@@ -77,8 +77,24 @@ else
 	"${KMAKE[@]}" bcm2709_defconfig
 	( cd "$K" && ARCH=arm scripts/kconfig/merge_config.sh -m .config "$HERE/kernel.fragment" )
 	echo "CONFIG_INITRAMFS_SOURCE=\"$WORK/initramfs.list\"" >> "$K/.config"
+	# Without module support every "=m" driver of the defconfig would be built
+	# in: of the sound and USB drivers keep only USB MIDI and USB serial (what
+	# they need comes back through Kconfig's selects in olddefconfig).
+	python3 - "$K/.config" <<'PRUNE'
+import re, sys
+keep = set("""SND SND_USB SND_USB_AUDIO SND_RAWMIDI SND_PROC_FS USB_SUPPORT USB USB_COMMON
+USB_DWCOTG USB_ACM USB_SERIAL USB_SERIAL_CH341 USB_SERIAL_FTDI_SIO USB_SERIAL_CP210X
+USB_DEFAULT_PERSIST USB_ARCH_HAS_HCD""".split())
+p = sys.argv[1]
+out = []
+for line in open(p):
+    m = re.match(r"CONFIG_((?:SND|USB)\w*)=[ym]$", line.strip())
+    out.append(f"# CONFIG_{m.group(1)} is not set\n" if m and m.group(1) not in keep else line)
+open(p, "w").writelines(out)
+PRUNE
 	"${KMAKE[@]}" olddefconfig
-	for sym in FB_TFT_ILI9486 TOUCHSCREEN_ADS7846 SPI_BCM2835 SERIAL_AMBA_PL011 BCM2835_WDT DEVTMPFS; do
+	for sym in FB_TFT_ILI9486 TOUCHSCREEN_ADS7846 SPI_BCM2835 SERIAL_AMBA_PL011 BCM2835_WDT DEVTMPFS \
+			USB_DWCOTG SND_USB_AUDIO SND_RAWMIDI USB_ACM USB_SERIAL_CH341; do
 		grep -q "^CONFIG_$sym=y" "$K/.config" || { echo "kernel config: CONFIG_$sym is not =y"; exit 1; }
 	done
 	"${KMAKE[@]}" zImage dtbs

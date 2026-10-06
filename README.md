@@ -404,9 +404,13 @@ profile's `"color"`.
 
 ## MIDI controllers
 
-MIDI controllers plugged into the computer work alongside the littlelx
-controller (or on their own: the bridge doesn't need the controller plugged in
-for them). Known now: **Akai APC Mini** (first version), **APC mini mk2** and
+Plug MIDI controllers into the **controller's USB ports** (the touchscreen
+Pi's four ports): the Pi passes them through to the bridge, which decides what
+they do. They work plugged into the computer too, alongside the controller or
+without it. The Pi's USB ports need the touchscreen firmware from this version
+on (Firmware > Install). Everything on those ports is powered by the
+controller: an APC Mini or a Spectra is fine on a good USB supply; with several
+devices, give the controller a strong supply (or a powered USB hub). Known now: **Akai APC Mini** (first version), **APC mini mk2** and
 **DJ TechTools Midi Fighter Spectra**. Plug one in and it works with its
 default layout:
 
@@ -431,7 +435,10 @@ the profile and its MIDI layouts use, so their lights follow MA.
 Other devices: write a definition (copy one from `midi/` in the repo into
 `littlelx-profiles/midi/`): which notes / CCs it sends, how its lights are set
 (palette of velocities and colours, channels for dim / bright, blink) and its
-default layout. `littlelx.py --midi` lists what the bridge knows and finds.
+default layout. `littlelx.py --midi` lists what the bridge knows and finds on
+the computer; the app's Status tab lists everything, including what's on the
+controller. littlelx modules (fader module, keypad) will use the same USB
+ports; for now a USB serial device there is listed but not used.
 
 ## Default layout (all of it is in the active profile, below)
 

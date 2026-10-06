@@ -28,7 +28,6 @@ CONFIG_WATCHDOG=y
 CONFIG_BCM2835_WDT=y
 # Not needed on a front panel
 # CONFIG_NET is not set
-# CONFIG_SOUND is not set
 # CONFIG_MEDIA_SUPPORT is not set
 # CONFIG_BLK_DEV_SD is not set
 # CONFIG_MD is not set
@@ -47,8 +46,7 @@ CONFIG_BCM2835_WDT=y
 # CONFIG_AUDIT is not set
 CONFIG_EXPERT=y
 # SD card + FAT: only used while an update is being written (the card is not
-# even mounted otherwise). USB stays off: the Pi 3's USB controller fires
-# thousands of IRQs/s for nothing.
+# even mounted otherwise).
 CONFIG_BLOCK=y
 CONFIG_MSDOS_PARTITION=y
 CONFIG_MMC=y
@@ -72,7 +70,24 @@ CONFIG_NLS_CODEPAGE_437=y
 # CONFIG_BLK_DEV_DM is not set
 # CONFIG_SCSI is not set
 # CONFIG_ATA is not set
-# CONFIG_USB_SUPPORT is not set
+# USB host: MIDI controllers (USB MIDI) and littlelx modules (USB serial:
+# Arduino / RP2040 CDC, CH340, FTDI, CP210x) plug into the Pi's USB ports.
+# The Pi's USB controller (dwc_otg) does its many interrupts in FIQ.
+CONFIG_USB_SUPPORT=y
+CONFIG_USB=y
+CONFIG_USB_DWCOTG=y
+CONFIG_USB_ACM=y
+CONFIG_USB_SERIAL=y
+CONFIG_USB_SERIAL_CH341=y
+CONFIG_USB_SERIAL_FTDI_SIO=y
+CONFIG_USB_SERIAL_CP210X=y
+CONFIG_SOUND=y
+CONFIG_SND=y
+CONFIG_SND_USB=y
+CONFIG_SND_USB_AUDIO=y
+# no network over USB (the Pi 3's built-in Ethernet sits on USB too)
+# CONFIG_USB_NET_DRIVERS is not set
+# CONFIG_USB_STORAGE is not set
 # CONFIG_HID is not set
 # CONFIG_INPUT_KEYBOARD is not set
 # CONFIG_INPUT_MOUSE is not set

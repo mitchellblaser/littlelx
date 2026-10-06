@@ -118,6 +118,108 @@ class Backend:
         return port
 
 
+class PiBackend:
+    """MIDI devices plugged into the controller's USB ports (the touchscreen
+    Pi passes them through; see USB in pi/app/littlelx.c). Same methods as
+    Backend; the bridge feeds it the Pi's USB / MI lines."""
+
+    ok, error, where = True, None, "controller"
+
+    def __init__(self, bridge):
+        self.b = bridge
+        self.ports = {}      # port name -> id
+        self.parsers = {}    # id -> (callback, parser state)
+        self.pending = {}    # id -> bytes waiting to go (flushed once per tick)
+
+    @staticmethod
+    def port_name(dev_id, name):
+        return f"{name} (controller USB {dev_id})"
+
+    def on_line(self, line):
+        """A USB line from the Pi: "USB + 3 midi APC MINI", "USB - 3", "MI 3 90007f"."""
+        p = line.split(" ", 4)
+        if p[0] == "USB" and len(p) >= 3 and p[1] == "+" and p[2].isdigit():
+            kind, name = (p[3] if len(p) > 3 else ""), (p[4] if len(p) > 4 else "USB device")
+            if kind == "midi":
+                self.ports[self.port_name(int(p[2]), name)] = int(p[2])
+        elif p[0] == "USB" and len(p) >= 3 and p[1] == "-" and p[2].isdigit():
+            gone = int(p[2])
+            self.ports = {n: i for n, i in self.ports.items() if i != gone}
+        elif p[0] == "MI" and len(p) >= 3 and p[1].isdigit():
+            got = self.parsers.get(int(p[1]))
+            if got:
+                try:
+                    data = bytes.fromhex(" ".join(p[2:]).replace(" ", ""))
+                except ValueError:
+                    return
+                for msg in parse(got[1], data):
+                    got[0](msg)
+
+    def lost(self):
+        """The controller (or its touchscreen) went away: so did these."""
+        self.ports = {}
+
+    def inputs(self):
+        return list(self.ports)
+
+    def outputs(self):
+        return list(self.ports)
+
+    def open_input(self, name, callback):
+        dev_id = self.ports[name]
+        self.parsers[dev_id] = (callback, {"status": 0, "data": [], "sysex": False})
+        return _PiPort(self, dev_id)
+
+    def open_output(self, name):
+        return _PiPort(self, self.ports[name])
+
+    def flush(self):
+        for dev_id, data in list(self.pending.items()):
+            del self.pending[dev_id]
+            for off in range(0, len(data), 60):  # short lines for the link
+                self.b.to_pi(f"MO {dev_id} {data[off:off + 60].hex()}")
+
+
+class _PiPort:
+    def __init__(self, backend, dev_id):
+        self.backend, self.id = backend, dev_id
+
+    def send_message(self, msg):
+        self.backend.pending[self.id] = self.backend.pending.get(self.id, b"") + bytes(msg)
+
+    def close_port(self):
+        self.backend.parsers.pop(self.id, None)
+
+
+def parse(state, data):
+    """MIDI bytes (as they come, in pieces) -> complete messages; running status
+    kept, SysEx and real-time bytes skipped."""
+    out = []
+    for byte in data:
+        if byte >= 0xF8:          # real-time: one byte, anywhere
+            continue
+        if byte == 0xF0:
+            state["sysex"] = True
+            continue
+        if state["sysex"]:
+            if byte == 0xF7 or byte >= 0x80:
+                state["sysex"] = False
+            if byte == 0xF7 or byte < 0x80:
+                continue
+        if byte >= 0x80:
+            state["status"], state["data"] = (byte if byte < 0xF0 else 0), []
+            continue
+        st = state["status"]
+        if not st:
+            continue
+        state["data"].append(byte)
+        need = 1 if (st & 0xF0) in (0xC0, 0xD0) else 2
+        if len(state["data"]) == need:
+            out.append([st] + state["data"])
+            state["data"] = []
+    return out
+
+
 def builtin_dir():
     import sys
     base = getattr(sys, "_MEIPASS", None) or os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
@@ -155,6 +257,7 @@ class Device:
         self.name = spec.get("name", "MIDI device")
         self.in_name, self.out_name = in_name, out_name
         self.inp = self.out = None
+        self.backend = None     # where it is plugged in (the computer / the controller)
         self.leds = {}          # (status, number) -> velocity last sent
         self.lookup = {}        # (kind, channel 0-15, number) -> (group, index)
         for c in spec.get("controls", []):
@@ -242,7 +345,8 @@ class Midi:
 
     def __init__(self, bridge, backend=None, user_dir=None):
         self.b = bridge
-        self.backend = backend or Backend()
+        self.pi = PiBackend(bridge)
+        self.backends = [backend or Backend(), self.pi]
         self.user_dir = user_dir
         self.defs = load_definitions(user_dir)
         self.devices = {}       # input port name -> Device
@@ -270,21 +374,34 @@ class Midi:
         self.scanned = 0.0
         self.update_status()
 
+    @property
+    def backend(self):  # the computer's own MIDI
+        return self.backends[0]
+
+    @backend.setter
+    def backend(self, b):
+        self.backends[0] = b
+
     def scan(self):
-        if not self.backend.ok:
+        self.unknown = []
+        for backend in self.backends:
+            self.scan_backend(backend)
+        self.update_status()
+
+    def scan_backend(self, backend):
+        if not backend.ok:
             if not getattr(self, "said", False):
                 self.said = True
-                print(f"MIDI devices: off ({self.backend.error})")
+                print(f"MIDI devices on this computer: off ({backend.error})")
             return
         try:
-            ins, outs = self.backend.inputs(), self.backend.outputs()
+            ins, outs = backend.inputs(), backend.outputs()
         except Exception:
             return
         for name in list(self.devices):
-            if name not in ins:
+            if self.devices[name].backend is backend and name not in ins:
                 print(f"MIDI: {self.devices[name].name} unplugged")
                 self.devices.pop(name).close()
-        self.unknown = []
         for name in ins:
             if name in self.devices:
                 continue
@@ -298,9 +415,10 @@ class Midi:
                 continue
             out = next((o for o in outs if o == name), None) or next((o for o in outs if matches(spec, o)), None)
             dev = Device(spec, entry, name, out)
+            dev.backend = backend
             try:
-                dev.inp = self.backend.open_input(name, lambda msg, d=dev: self.b.post_midi(d, msg))
-                dev.out = self.backend.open_output(out) if out else None
+                dev.inp = backend.open_input(name, lambda msg, d=dev: self.b.post_midi(d, msg))
+                dev.out = backend.open_output(out) if out else None
             except Exception as e:
                 print(f"MIDI: can't open {name}: {e}")
                 dev.close()
@@ -309,11 +427,11 @@ class Midi:
             print(f"MIDI: {dev.name} connected ({name})")
             dev.all_off()
             self.dirty = True
-        self.update_status()
 
     # ---- what's connected (the app reads this from its own thread: a snapshot)
     def update_status(self):
-        rows = [{"kind": "midi", "name": d.name, "port": d.in_name, "connected": True}
+        rows = [{"kind": "midi", "name": d.name, "port": d.in_name, "connected": True,
+                 "where": getattr(d.backend, "where", "computer")}
                 for d in self.devices.values()]
         rows += [{"kind": "midi", "name": n, "port": n, "connected": True, "unknown": True} for n in self.unknown]
         self.snapshot = rows
@@ -392,6 +510,7 @@ class Midi:
         if self.dirty:
             self.dirty = False
             self.refresh()
+        self.pi.flush()
 
     def page_changed(self):
         for dev in self.devices.values():  # new page: catch each fader again

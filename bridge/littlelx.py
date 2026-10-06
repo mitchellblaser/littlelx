@@ -2084,6 +2084,7 @@ class Bridge:
         self.quit = threading.Event()
         self.started = time.time()
         self.midi = lxmidi.Midi(self, user_dir=os.path.join(PROFILE_DIR, "midi"))
+        self.usb_modules = {}                # id -> name: modules on the controller's USB
         self.build_maps()
 
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -2818,7 +2819,10 @@ class Bridge:
             cal = self.cfg.get("touch_cal")
             if cal:
                 self.to_pi("K " + " ".join(str(x) for x in cal))
+            self.to_pi("USB ?")  # what's plugged into its USB ports
             self.screen.draw()
+        elif parts[0] in ("USB", "MI", "MD"):
+            self.on_usb(line, parts)
         elif parts[0] == "STAT":
             st = dict(kv.split("=", 1) for kv in parts[1:] if "=" in kv)
             errs = {k: int(v) for k, v in st.items() if k != "lines" and v.isdigit() and int(v)}
@@ -3054,7 +3058,28 @@ class Bridge:
              "connected": bool(ser and self.pi_ready), "port": None,
              "firmware": self.pi_version if ser and self.pi_ready else None},
         ]
+        rows += [{"kind": "module", "name": name, "connected": True, "port": None, "firmware": None,
+                  "where": "controller", "unknown": True} for name in list(self.usb_modules.values())]
         return rows + self.midi.status()
+
+    def on_usb(self, line, parts):
+        """MIDI devices and modules plugged into the controller's USB ports."""
+        if parts[0] == "MI":
+            self.midi.pi.on_line(line)
+            return
+        if parts[0] == "MD":  # a module's line: modules come later
+            return
+        self.midi.pi.on_line(line)
+        if len(parts) >= 3 and parts[1] in "+-" and parts[2].isdigit():
+            dev_id = int(parts[2])
+            if parts[1] == "+" and len(parts) > 3 and parts[3] == "serial":
+                name = line.split(" ", 4)[4] if len(parts) > 4 else "USB serial device"
+                if self.usb_modules.get(dev_id) != name:
+                    print(f"Module on the controller's USB: {name}")
+                self.usb_modules[dev_id] = name
+            elif parts[1] == "-":
+                self.usb_modules.pop(dev_id, None)
+            self.midi.scanned = 0.0  # pick it up now
 
     def post_midi(self, dev, msg):
         """From a MIDI device's own thread: into the bridge's loop."""
@@ -3070,6 +3095,9 @@ class Bridge:
 
     def background(self, now):
         """Housekeeping with or without the controller."""
+        if not (self.ser and self.pi_ready) and (self.midi.pi.ports or self.usb_modules):
+            self.midi.pi.lost()  # what was plugged into it went with it
+            self.usb_modules = {}
         self.midi.tick(now)
         if (self.cfg.get("ma3", {}).get("auto_install", True) and not self.generic()
                 and now - self.ma_installed_at > 30):
