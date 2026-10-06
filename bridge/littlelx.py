@@ -1654,9 +1654,11 @@ class Bridge:
             elif k:
                 self.digital[k["pin"]] = ("key", i)
         self.encs = []
+        if any(e and e.get("div", 4) <= 2 for e in hw["encoders"]):
+            for e in hw["encoders"]:  # one controller's encoders are the same model:
+                if e and e.get("div", 4) != 2:  # a click size found on one fits the other
+                    e["div"] = 2  # (also repairs a 1 from an earlier, over-eager detection)
         for i, e in enumerate(hw["encoders"]):
-            if e and e.get("div", 4) < 2:  # set by an earlier, over-eager click detection
-                e["div"] = 2
             self.encs.append(Encoder(e.get("div", 4)) if e else None)
             if e:
                 self.digital[e["a"]] = ("enc", i, "a")
@@ -2229,9 +2231,11 @@ class Bridge:
             seen = self.enc_rest[i]
             seen[enc.state] = seen.get(enc.state, 0) + 1
             if seen.get(0, 0) >= 2 and seen.get(3, 0) >= 2:
-                e["div"] = enc.div = 2
-                enc.acc = 0
-                print(f"Encoder {i + 1}: 2 signal changes per click detected, adjusted.")
+                for k, other in enumerate(self.cfg["hw"]["encoders"]):  # same model: all of them
+                    if other and k < len(self.encs) and self.encs[k]:
+                        other["div"] = self.encs[k].div = 2
+                        self.encs[k].acc = 0
+                print("Encoders: 2 signal changes per click detected, adjusted.")
                 save_config(self.cfg)
                 if self.ser:
                     save_to_mega(self.cfg, self.ser, keep=True)
