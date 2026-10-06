@@ -274,12 +274,13 @@ end
 
 -- A DMX value as a fraction of full. MA gives "128/1" (value / bytes) or a number.
 local function dmx(v)
-	if type(v) == "number" then return v <= 255 and v / 255 or v / 65535 end
+	-- MA3 gives 24-bit numbers (full = 16777216); older forms "128/1" (value / bytes)
+	if type(v) == "number" then return v / 16777216 end
 	if type(v) ~= "string" then return nil end
 	local a, r = v:match("^%s*(%d+)%s*/%s*(%d+)")
 	if a then return tonumber(a) / (256 ^ tonumber(r) - 1) end
 	local n = tonumber(v)
-	if n then return n <= 255 and n / 255 or n / 65535 end
+	if n then return n / 16777216 end
 	return nil
 end
 
@@ -304,6 +305,17 @@ end
 
 -- Named values with the percent MA's "At" takes: where each one sits in its
 -- channel function's DMX range (MA's physical units vary: Dimmer is 0..1).
+-- Index of the channel function in its logical channel (0-based, as
+-- GetProgPhaser's channel_function).
+local function function_index(cf)
+	local ok, parent = pcall(function() return cf:Parent() end)
+	local cname, cfrom = oname(cf), prop(cf, "DMXFrom", "From")
+	for k, f in ipairs(ok and parent and kids(parent) or {}) do
+		if oname(f) == cname and prop(f, "DMXFrom", "From") == cfrom then return k - 1 end
+	end
+	return nil
+end
+
 local function channel_sets(sf, aname)
 	local out = {}
 	local cf = sf ~= nil and channel_function(sf, aname)
@@ -371,15 +383,56 @@ local function report_sets(aname)
 	send("sets", "s", aname .. "|" .. table.concat(names, "|"))
 end
 
+-- Put a named value into the programmer the way MA stores it: channel
+-- function + percent within it ("At" alone doesn't say which function, so a
+-- gobo split over several functions came out wrong). Read back to check.
+local function set_on_fixture(sf, aname, setname)
+	local ai = try(GetAttributeIndex, aname)
+	local ui = ai and try(GetUIChannelIndex, sf, ai)
+	local cf = ui and channel_function(sf, aname)
+	local idx = cf and function_index(cf)
+	if not idx then return false end
+	local pct
+	for _, set in ipairs(channel_sets(sf, aname)) do
+		if set.name == setname then pct = set.value end
+	end
+	if not pct then return false end
+	local function ok()
+		local p = try(GetProgPhaser, ui, false)
+		local v = type(p) == "table" and type(p[1]) == "table" and p[1] or nil
+		return v and math.abs((num(v.absolute) or -99) - pct) < 0.2 and (num(v.channel_function) or idx) == idx
+	end
+	local value = { absolute = pct, channel_function = idx }
+	for _, try_set in ipairs({
+		function() SetProgPhaserValue(ui, 1, value) end,
+		function() SetProgPhaserValue(ui, 0, value) end,
+		function() SetProgPhaser(ui, { [1] = value }) end,
+	}) do
+		if pcall(try_set) and ok() then return true end
+	end
+	return false
+end
+
 local function apply_set(aname, n)
-	local set = channel_sets(try(SelectionFirst), aname)[num(n) or 0]
+	local sf0 = try(SelectionFirst)
+	local set = channel_sets(sf0, aname)[num(n) or 0]
 	if not set then
 		send("busy", "s", "that value isn't on the selected fixture")
 		return
 	end
+	local done, sf, guard = 0, sf0, 0
+	while sf ~= nil and guard < 5000 do -- every selected fixture
+		guard = guard + 1
+		if set_on_fixture(sf, aname, set.name) then done = done + 1 end
+		sf = try(SelectionNext, sf)
+	end
+	if done > 0 then
+		Printf(string.format("littlelx: %s %s -> programmer, %d fixtures", aname, set.name, done))
+		return
+	end
 	local v = string.format("%.2f", set.value):gsub("0+$", ""):gsub("%.$", "")
 	Cmd(string.format('Attribute "%s" At %s', aname, v))
-	Printf(string.format("littlelx: %s %s -> At %s", aname, set.name, v))
+	Printf(string.format("littlelx: %s %s -> At %s (programmer call not available)", aname, set.name, v))
 end
 
 local tab_choice        -- a tab picked on the controller (until MA's own selection changes)
@@ -456,8 +509,9 @@ local function probe()
 		table.sort(keys)
 		say(name, "{", table.concat(keys, ", "), "}")
 	end
-	for _, f in ipairs({ "SelectedFeature", "SelectionFirst", "GetAttributeIndex", "GetUIChannelIndex",
-		"GetProgPhaser", "GetUIChannel", "GetRTChannel", "CurrentProfile", "ShowData" }) do
+	for _, f in ipairs({ "SelectedFeature", "SelectionFirst", "SelectionNext", "GetAttributeIndex", "GetUIChannelIndex",
+		"GetProgPhaser", "GetProgPhaserValue", "SetProgPhaser", "SetProgPhaserValue", "GetUIChannel",
+		"GetRTChannel", "GetDMXValue", "CurrentProfile", "ShowData" }) do
 		say(f, type(_G and _G[f]))
 	end
 	local feat = try(SelectedFeature)
@@ -564,7 +618,17 @@ local function probe()
 			local ch = try(GetUIChannel, ui)
 			dump("GetUIChannel", ch)
 			local rt = type(ch) == "table" and num(ch.rt_index or ch.rt_channel or ch.rtchannel)
-			if rt then dump("GetRTChannel", try(GetRTChannel, rt)) else say("no rt channel index in GetUIChannel") end
+			if rt then
+				local r = try(GetRTChannel, rt)
+				dump("GetRTChannel", r)
+				if type(r) == "table" then
+					dump("  patch", r.patch)
+					dump("  info", r.info)
+				end
+			else
+				say("no rt channel index in GetUIChannel")
+			end
+			dump("GetProgPhaserValue(1)", try(GetProgPhaserValue, ui, 1))
 		end
 	end
 	-- one OSC message per line (one big one is too long to arrive), then an
