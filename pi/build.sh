@@ -59,18 +59,21 @@ cmp -s "$WORK/initramfs.list.new" "$WORK/initramfs.list" 2>/dev/null \
 
 echo "== kernel"
 K="$WORK/linux"
-if [ ! -d "$K" ]; then
-	git init -q "$K"
-	git -C "$K" fetch -q --depth 1 "$KERNEL_REPO" "$KERNEL_COMMIT" \
-		|| git -C "$K" fetch -q --depth 1 "$KERNEL_REPO" "$KERNEL_REF"
-	git -C "$K" checkout -q FETCH_HEAD
-fi
+# Everything later steps need from the kernel build, kept small in $KO so CI
+# can cache it (actions/cache): with it, the kernel isn't even downloaded.
+KO="$WORK/kout"
 KMAKE=(make -C "$K" ARCH=arm CROSS_COMPILE="$CROSS" -j"$JOBS")
 # Rebuild the kernel only when something that goes into it changed.
-KSTAMP="$(cat "$HERE/kernel.fragment" "$WORK/initramfs.list" | sha256sum | cut -c1-16)-$(git -C "$K" rev-parse HEAD 2>/dev/null)"
-if [ -f "$K/arch/arm/boot/zImage" ] && [ "$(cat "$WORK/kernel.stamp" 2>/dev/null)" = "$KSTAMP" ]; then
+KSTAMP="$(cat "$HERE/kernel.fragment" "$WORK/initramfs.list" | sha256sum | cut -c1-16)-$KERNEL_COMMIT"
+if [ -f "$KO/zImage" ] && [ "$(cat "$KO/stamp" 2>/dev/null)" = "$KSTAMP" ]; then
 	echo "(unchanged, not rebuilt)"
 else
+	if [ ! -d "$K" ]; then
+		git init -q "$K"
+		git -C "$K" fetch -q --depth 1 "$KERNEL_REPO" "$KERNEL_COMMIT" \
+			|| git -C "$K" fetch -q --depth 1 "$KERNEL_REPO" "$KERNEL_REF"
+		git -C "$K" checkout -q FETCH_HEAD
+	fi
 	"${KMAKE[@]}" bcm2709_defconfig
 	( cd "$K" && ARCH=arm scripts/kconfig/merge_config.sh -m .config "$HERE/kernel.fragment" )
 	echo "CONFIG_INITRAMFS_SOURCE=\"$WORK/initramfs.list\"" >> "$K/.config"
@@ -79,10 +82,16 @@ else
 		grep -q "^CONFIG_$sym=y" "$K/.config" || { echo "kernel config: CONFIG_$sym is not =y"; exit 1; }
 	done
 	"${KMAKE[@]}" zImage dtbs
-	echo "$KSTAMP" > "$WORK/kernel.stamp"
+	rm -rf "$KO"
+	mkdir -p "$KO/overlays"
+	cp "$K/arch/arm/boot/zImage" "$K"/arch/arm/boot/dts/broadcom/bcm2710-rpi-3-b{,-plus}.dtb \
+		"$K/scripts/dtc/dtc" "$K/usr/gen_init_cpio" "$KO/"
+	cp "$K"/arch/arm/boot/dts/overlays/*.dtbo "$KO/overlays/"
+	cp "$K/arch/arm/boot/dts/overlays/overlay_map.dtb" "$KO/overlays/" 2>/dev/null || true
+	echo "$KSTAMP" > "$KO/stamp"
 fi
 echo "file /init $WORK/init 0755 0 0" > "$WORK/app.list"
-"$K/usr/gen_init_cpio" "$WORK/app.list" | gzip -9 -n > "$WORK/littlelx.cpio.gz"
+"$KO/gen_init_cpio" "$WORK/app.list" | gzip -9 -n > "$WORK/littlelx.cpio.gz"
 
 echo "== firmware ($FW_TAG)"
 mkdir -p "$WORK/fw"
@@ -98,15 +107,15 @@ S="$B/a"
 rm -rf "$B"
 mkdir -p "$S/overlays"
 cp "$WORK/fw/"* "$HERE/boot/config.txt" "$B/"
-cp "$HERE/boot/cmdline.txt" "$K/arch/arm/boot/zImage" "$WORK/littlelx.cpio.gz" "$S/"
-cp "$K"/arch/arm/boot/dts/broadcom/bcm2710-rpi-3-b{,-plus}.dtb "$S/"
+cp "$HERE/boot/cmdline.txt" "$KO/zImage" "$WORK/littlelx.cpio.gz" "$S/"
+cp "$KO"/bcm2710-rpi-3-b{,-plus}.dtb "$S/"
 for o in $OVERLAYS; do
-	cp "$K/arch/arm/boot/dts/overlays/$o.dtbo" "$S/overlays/"
+	cp "$KO/overlays/$o.dtbo" "$S/overlays/"
 done
 for src in "$HERE"/overlays/*-overlay.dts; do   # our own overlays
-	"$K/scripts/dtc/dtc" -@ -q -I dts -O dtb -o "$S/overlays/$(basename "$src" -overlay.dts).dtbo" "$src"
+	"$KO/dtc" -@ -q -I dts -O dtb -o "$S/overlays/$(basename "$src" -overlay.dts).dtbo" "$src"
 done
-cp "$K/arch/arm/boot/dts/overlays/overlay_map.dtb" "$S/overlays/" 2>/dev/null || true
+cp "$KO/overlays/overlay_map.dtb" "$S/overlays/" 2>/dev/null || true
 # The firmware only loads overlays from ${os_prefix}overlays/ if a README file
 # exists there; without it, it silently looks in /overlays/ (which we don't have).
 echo "littlelx: overlays for this OS slot (this file must exist)" > "$S/overlays/README"

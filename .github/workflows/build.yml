@@ -9,11 +9,26 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+      # The kernel is the slow part: keep its outputs (and the Pi boot firmware)
+      # between runs. build.sh checks a stamp and only rebuilds when the kernel
+      # config, initramfs or pinned commit changed, so an older cache is safe.
+      - uses: actions/cache@v4
+        id: kcache
+        with:
+          path: |
+            pi/work/kout
+            pi/work/fw
+          key: pi-kernel-${{ hashFiles('pi/kernel.fragment', 'pi/build.sh') }}
+          restore-keys: pi-kernel-
       - name: Install build tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-arm-linux-gnueabihf libc6-dev-armhf-cross \
-            make flex bison bc libssl-dev dosfstools mtools fdisk
+          if [ "${{ steps.kcache.outputs.cache-hit }}" = "true" ]; then
+            sudo apt-get install -y dosfstools mtools fdisk   # kernel cached: no cross toolchain
+          else
+            sudo apt-get install -y gcc-arm-linux-gnueabihf libc6-dev-armhf-cross \
+              make flex bison bc libssl-dev dosfstools mtools fdisk
+          fi
           pip install ziglang   # musl build of the touchscreen app (~5x smaller)
       - name: Build SD card image
         run: ./pi/build.sh
