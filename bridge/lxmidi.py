@@ -260,11 +260,15 @@ class Device:
         self.backend = None     # where it is plugged in (the computer / the controller)
         self.leds = {}          # (status, number) -> velocity last sent
         self.lookup = {}        # (kind, channel 0-15, number) -> (group, index)
+        self.loose = {}         # (kind, number) -> (group, index): any channel
+        self.channels = {}      # group -> the channel it really uses (set up differently)
+        self.told = set()       # unmatched messages already logged
         for c in spec.get("controls", []):
             kind = "cc" if c.get("msg") == "cc" else "note"
             ch = int(c.get("channel", 1)) - 1
             for i, n in enumerate(c.get("numbers", [])):
                 self.lookup[(kind, ch, int(n))] = (c["group"], i)
+                self.loose.setdefault((kind, int(n)), (c["group"], i))
         self.faders = {}        # (group, index) -> dict(pos, sent, picked, at, pending)
         self.down = set()
 
@@ -301,6 +305,8 @@ class Device:
         number = int(c["numbers"][i])
         how = led.get(state) if state != "off" else "off"
         ch = int(led.get("channel", c.get("channel", 1))) - 1
+        if group in self.channels and "channel" not in led or led.get("channel") == c.get("channel"):
+            ch = self.channels.get(group, ch)  # the device sends on another channel: light it there too
         vel = int(led.get("off", 0))
         if isinstance(how, dict):
             ch = int(how.get("channel", ch + 1)) - 1
@@ -440,17 +446,33 @@ class Midi:
         return list(getattr(self, "snapshot", []))
 
     # ---- input
+    def find(self, dev, kind, ch, number):
+        """The control a message is for: exact, else the same note / CC on another
+        channel (a device set up with another channel, e.g. in its own utility)."""
+        hit = dev.lookup.get((kind, ch, number))
+        if not hit:
+            hit = dev.loose.get((kind, number))
+            if hit and dev.channels.get(hit[0]) != ch:
+                dev.channels[hit[0]] = ch
+                print(f"MIDI: {dev.name} sends on channel {ch + 1}: using that")
+                dev.leds = {}
+                self.dirty = True  # its lights on that channel too
+        if not hit and (kind, ch, number) not in dev.told and len(dev.told) < 20:
+            dev.told.add((kind, ch, number))
+            print(f"MIDI: {dev.name} sent {kind} {number} on channel {ch + 1}: not one of its controls")
+        return hit
+
     def on_message(self, dev, msg):
         if not msg:
             return
         st, kind = msg[0], msg[0] & 0xF0
         ch = st & 15
         if kind in (0x90, 0x80) and len(msg) >= 3:
-            hit = dev.lookup.get(("note", ch, msg[1]))
+            hit = self.find(dev, "note", ch, msg[1])
             if hit:
                 self.button(dev, hit[0], hit[1], kind == 0x90 and msg[2] > 0)
         elif kind == 0xB0 and len(msg) >= 3:
-            hit = dev.lookup.get(("cc", ch, msg[1]))
+            hit = self.find(dev, "cc", ch, msg[1])
             if hit:
                 c = dev.control(hit[0])
                 if c.get("type") == "fader":
