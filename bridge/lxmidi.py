@@ -39,6 +39,10 @@ except Exception:  # not installed, or no MIDI system (e.g. a container)
     rtmidi = None
 
 
+# The computer's own virtual MIDI ports, not devices: not worth listing
+VIRTUAL = ("through", "iac driver", "network session", "microsoft gs wavetable", "loopmidi")
+
+
 def rgb(hexstr):
     h = str(hexstr or "").lstrip("#")
     if len(h) >= 6:
@@ -286,7 +290,7 @@ class Midi:
                 continue
             spec = next((s for s in self.defs.values() if matches(s, name)), None)
             if not spec:
-                if "through" not in name.lower() and "midi through" not in name.lower():
+                if not any(v in name.lower() for v in VIRTUAL):
                     self.unknown.append(name)
                 continue
             entry = self.entry_for(spec, name)
