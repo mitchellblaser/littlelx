@@ -1227,7 +1227,8 @@ class Screen:
     ]
 
     def in_setup(self):
-        return self.name == "setup" or self.name.startswith(("key", "exec"))
+        # setup, key<n> (editing a key), exec<n> (its executor number) - not "keypad"
+        return self.name == "setup" or re.fullmatch(r"(key|exec)\d+", self.name) is not None
 
     @classmethod
     def describe(cls, act):
@@ -1493,7 +1494,7 @@ class Screen:
             else:
                 self.b.ma_key(act["keypad"])
         elif "back" in act:
-            self.set_screen("setup" if self.name.startswith("key") else
+            self.set_screen("setup" if re.fullmatch(r"key\d+", self.name) else
                             "encoders" if self.name.startswith("entry") else
                             f"key{self.name[4:]}" if self.name.startswith("exec") else "main")
         elif "encpage" in act:
