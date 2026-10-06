@@ -260,7 +260,8 @@ class ProfilesTab(QWidget):
         col = QVBoxLayout()
         for name, fn in (("Make active", self.activate), ("Edit in Builder", self.do_edit), ("New", self.new),
                          ("Duplicate", self.duplicate), ("Rename", self.rename), ("Delete", self.delete),
-                         ("Import...", self.import_), ("Export...", self.export), ("Open folder", self.folder)):
+                         ("Import...", self.import_), ("Export...", self.export), ("Open folder", self.folder),
+                         ("Restore examples...", self.examples)):
             b = QPushButton(name)
             b.clicked.connect(fn)
             col.addWidget(b)
@@ -380,6 +381,16 @@ class ProfilesTab(QWidget):
         path, _ = QFileDialog.getSaveFileName(self, "Export the profile", name + ".json", "Profiles (*.json)")
         if path:
             shutil.copyfile(lx.profile_path(name), path)
+
+    def examples(self):
+        names = [os.path.basename(p)[:-5] for p in lx.example_profiles()]
+        if QMessageBox.question(self, "littlelx", "Write the example profiles (" + ", ".join(names) +
+                                ") again? Your own changes to those files are replaced.") != QMessageBox.Yes:
+            return
+        lx.install_example_profiles(overwrite=True)
+        if self.runner.cfg.get("profile") in names:  # the active one: use the restored version
+            self.runner.activate(lx.load_profile(self.runner.cfg["profile"]))
+        QTimer.singleShot(400, self.refresh)
 
     def folder(self):
         os.makedirs(lx.PROFILE_DIR, exist_ok=True)

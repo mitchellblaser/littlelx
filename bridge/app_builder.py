@@ -680,7 +680,7 @@ class ScreensPage(QWidget):
         lay = QHBoxLayout(self)
         left = QVBoxLayout()
         self.names = QListWidget()
-        self.names.currentTextChanged.connect(self.select)
+        self.names.currentRowChanged.connect(self.on_row)
         left.addWidget(self.names)
         for name, fn in (("New screen", self.new), ("New keypad", self.new_keypad), ("Rename", self.rename),
                          ("Delete", self.delete)):
@@ -716,9 +716,47 @@ class ScreensPage(QWidget):
         kl.addWidget(self.keytable)
         self.kind.addWidget(kp)
         r.addWidget(self.kind)
-        lay.addWidget(self.right, 1)
+        # built-in screens: where they're set up (the keypad can be customised)
+        self.info = QWidget()
+        il = QVBoxLayout(self.info)
+        self.info_text = note("")
+        il.addWidget(self.info_text)
+        self.customise = QPushButton("Customise the keypad")
+        self.customise.clicked.connect(self.customise_keypad)
+        il.addWidget(self.customise, 0, Qt.AlignLeft)
+        il.addStretch()
+        self.rstack = QStackedWidget()
+        self.rstack.addWidget(self.right)
+        self.rstack.addWidget(self.info)
+        lay.addWidget(self.rstack, 1)
         self.screens_fn = screens_fn
         self.key_actions = {}
+
+    BUILTIN = {
+        "main": "The main page (always there): its faders are on the Faders tab, its buttons on the "
+                "Screen buttons tab, the top bar and colours on the Look tab.",
+        "keypad": "The built-in command keypad. Customise it to change its keys - it then becomes this "
+                  "profile's own 'keypad' screen.",
+        "encoders": "The Encoders page: set up on the Encoders tab (and 'Encoders page' on the Look tab).",
+        "setup": "The touchscreen's key Setup (always there, from the Setup button).",
+    }
+
+    def on_row(self, row):
+        item = self.names.item(row) if row >= 0 else None
+        name = item.data(Qt.UserRole) if item else None
+        if name in self.BUILTIN and name not in self.screens:
+            self.store()
+            self.cur = None
+            self.info_text.setText(f"<b>{name}</b> (built in)<br><br>{self.BUILTIN[name]}")
+            self.customise.setVisible(name == "keypad")
+            self.rstack.setCurrentIndex(1)
+            return
+        self.rstack.setCurrentIndex(0)
+        self.select(name or "")
+
+    def customise_keypad(self):
+        self.screens["keypad"] = {"type": "keypad", "keys": copy.deepcopy(self.default_keys), "back": "main"}
+        self.reload("keypad")
 
     def select(self, name):
         self.store()
@@ -822,16 +860,29 @@ class ScreensPage(QWidget):
         self.cur = None
         self.names.blockSignals(True)
         self.names.clear()
-        self.names.addItems(list(self.screens))
+        for name in self.screens:
+            item = QListWidgetItem(name)
+            item.setData(Qt.UserRole, name)
+            self.names.addItem(item)
+        for name in self.BUILTIN:
+            if name not in self.screens:
+                item = QListWidgetItem(f"{name}   (built in)")
+                item.setData(Qt.UserRole, name)
+                item.setForeground(QColor("gray"))
+                f = item.font()
+                f.setItalic(True)
+                item.setFont(f)
+                self.names.addItem(item)
         self.names.blockSignals(False)
-        if sel:
-            self.names.setCurrentRow(list(self.screens).index(sel))
-        self.select(sel or "")
+        names = [self.names.item(i).data(Qt.UserRole) for i in range(self.names.count())]
+        self.names.setCurrentRow(names.index(sel) if sel in names else -1)
+        self.on_row(self.names.currentRow())
 
     def load(self, p):
         self.cur = None
+        self.default_keys = p.get("keypad") or lx.Screen.KEYPAD
         self.screens = copy.deepcopy(p.get("screens") or {})
-        self.reload(next(iter(self.screens), None))
+        self.reload(next(iter(self.screens), "main"))
 
     def collect(self, p):
         self.store()

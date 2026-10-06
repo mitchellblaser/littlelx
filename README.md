@@ -213,7 +213,9 @@ there, switches profiles, and opens the littlelx window:
 
 * **Status** - controller, touchscreen, profile, where it sends to, the link.
 * **Profiles** - make one active (it's stored on the controller too), edit in
-  the Builder, new, duplicate, rename, delete, import / export, open the folder.
+  the Builder, new, duplicate, rename, delete, import / export, open the folder,
+  and **Restore examples** (writes the shipped example profiles again - e.g.
+  after an update brings newer ones; missing examples are added by themselves).
 * **Builder** - edit a profile with forms: connection, faders, the 20 keys
   (laid out like the controller), the touchscreen's buttons, encoders, your own
   screens and keypad, the look (top bar, colours) and feedback. The JSON tab
@@ -264,8 +266,8 @@ A **profile** describes the whole controller: where it talks to (grandMA3, or
 plain OSC to anything else), what each fader, key and encoder does, the
 touchscreen's main buttons and its keypad. Profiles are plain files in the
 `littlelx-profiles` folder in your home folder - edit them in any text editor,
-copy them, share them. Two examples are put there on first run: `grandMA3.json`
-(the default layout) and `Generic OSC.json`.
+copy them, share them. Two examples are put there (when missing):
+`grandMA3.json` (the default layout) and `Generic OSC.json`.
 
 The **active** profile is also stored on the controller (next to the learned
 wiring), so it travels with it: plug it into another computer and it brings

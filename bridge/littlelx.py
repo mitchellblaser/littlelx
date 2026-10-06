@@ -323,16 +323,25 @@ def load_profile(name):
         return json.load(f)
 
 
-def install_example_profiles():
-    """First run: put the example profiles (profiles/ in the repo) in PROFILE_DIR."""
-    if os.path.isdir(PROFILE_DIR):
-        return
-    os.makedirs(PROFILE_DIR, exist_ok=True)
+def example_profiles():
+    """The example profiles shipped with the bridge (profiles/ in the repo)."""
     src = resource("profiles")
-    for f in (os.listdir(src) if os.path.isdir(src) else []):
-        if f.endswith(".json"):
-            with open(os.path.join(src, f)) as a, open(os.path.join(PROFILE_DIR, f), "w") as b:
+    return [os.path.join(src, f) for f in sorted(os.listdir(src))
+            if f.endswith(".json")] if os.path.isdir(src) else []
+
+
+def install_example_profiles(overwrite=False):
+    """Put the example profiles in PROFILE_DIR: the missing ones, or (overwrite)
+    all of them again - e.g. newer versions after an update."""
+    os.makedirs(PROFILE_DIR, exist_ok=True)
+    done = []
+    for path in example_profiles():
+        dest = os.path.join(PROFILE_DIR, os.path.basename(path))
+        if overwrite or not os.path.exists(dest):
+            with open(path) as a, open(dest, "w") as b:
                 b.write(a.read())
+            done.append(os.path.basename(path)[:-5])
+    return done
 
 
 def save_profile(prof):
