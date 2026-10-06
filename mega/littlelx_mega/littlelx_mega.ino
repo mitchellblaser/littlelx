@@ -13,7 +13,7 @@
  *
  * USB protocol (500000 baud, text lines):
  *   Mega -> computer
- *     HELLO littlelx-mega 1
+ *     HELLO littlelx-mega 1 <version>
  *     PI 3                touchscreen port (Serial3)
  *     D<pin> <0|1>        digital pin changed (pullups: 0 = pressed)
  *     A<ch> <0..1023>     analog input A<ch> changed
@@ -50,6 +50,7 @@
  */
 
 #include <EEPROM.h>
+#include "version.h"
 
 #define NPINS 70
 #define DEBOUNCE_MS 4
@@ -141,7 +142,7 @@ static void report_key(uint8_t i)
 
 static void dump_all()
 {
-	Serial.println(F("HELLO littlelx-mega 1"));
+	Serial.println(F("HELLO littlelx-mega 1 " LLX_VERSION));
 	Serial.println(F("PI 3"));
 	Serial.print(F("MX"));
 	for (uint8_t p = 2; p < NPINS; p++)
@@ -569,7 +570,7 @@ void setup()
 	for (uint8_t i = 0; i < 16; i++) {
 		asent[i] = -100;
 	}
-	Serial.println(F("HELLO littlelx-mega 1"));
+	Serial.println(F("HELLO littlelx-mega 1 " LLX_VERSION));
 	Serial.println(F("PI 3"));
 	PISER.print("?\n"); /* ask the touchscreen to say hello */
 }

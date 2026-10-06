@@ -89,11 +89,11 @@ Mega RX3 (pin 15) ◄──────────────── Pi GPIO14 
 Optional: back up the old firmware first, since it's being replaced:
 `avrdude -p m2560 -c wiring -P /dev/cu.usbmodemXXXX -b 115200 -D -U flash:r:old-mega.hex:i`
 
-Easiest: in the littlelx app, **Firmware > Flash the built-in firmware** (the
-app carries the firmware that matches it), or **Flash from file...** with a
-`.hex`. From a terminal: `littlelx.py --flash-mega` (the built app / .exe) or
-`littlelx.py --flash-mega littlelx_mega.ino.hex` (the `littlelx-mega-hex`
-from the GitHub build). Only the program is replaced: the learned wiring and
+Easiest: in the littlelx app, **Firmware > Install** (it carries the firmware
+that matches it, and updates the touchscreen too). From a terminal:
+`littlelx.py --install` (the built app / .exe), `littlelx.py --install
+littlelx-firmware.lxfw` (the `littlelx-firmware` from the GitHub build), or
+just the Mega: `littlelx.py --flash-mega littlelx_mega.ino.hex`. Only the program is replaced: the learned wiring and
 the active profile stay on the controller. If it fails halfway, just flash
 again - the bootloader is never touched.
 
@@ -230,8 +230,12 @@ there, switches profiles, and opens the littlelx window:
   shows the whole file for anything else. **Open** picks any profile to edit,
   **Save as copy** saves it under a new name, **Save & make active** uses it
   straight away.
-* **Firmware** - flash the controller (Mega) with the built-in firmware or a
-  .hex, and update the touchscreen from a littlelx-pi-update.zip.
+* **Firmware** - one **Install** for everything: the app carries a firmware
+  package (`.lxfw`) with the controller (Mega) and touchscreen firmware of its
+  own version; Install shows what's installed and updates only what's out of
+  date, the controller first (the touchscreen is updated through it). **Install
+  from file** takes another `.lxfw`; single parts (a Mega .hex, a touchscreen
+  .zip) are under Advanced. Modules will join the same package.
 * **Calibration** - fader bottom / top (live readings) and the touchscreen.
 * **Log** - what the bridge reports (also in `littlelx.log` in your home folder).
 

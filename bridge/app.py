@@ -24,7 +24,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from PySide6.QtCore import QTimer, Qt, QUrl  # noqa: E402
 from PySide6.QtGui import QAction, QActionGroup, QColor, QDesktopServices, QFont, QIcon, QPainter, QPixmap  # noqa: E402
 from PySide6.QtWidgets import (  # noqa: E402
-    QApplication, QFileDialog, QFormLayout, QGridLayout, QGroupBox, QHBoxLayout, QInputDialog, QLabel,
+    QApplication, QCheckBox, QFileDialog, QHeaderView, QTableWidget, QTableWidgetItem, QFormLayout, QGridLayout, QGroupBox, QHBoxLayout, QInputDialog, QLabel,
     QListWidget, QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QSystemTrayIcon,
     QTabWidget, QVBoxLayout, QWidget,
 )
@@ -51,7 +51,8 @@ class Log(io.TextIOBase):
             self.file = open(LOG_PATH, "a", buffering=1, encoding="utf-8")
         except OSError:
             self.file = None
-        self.progress = None  # last "NN%" seen (touchscreen update)
+        self.progress = None  # last "NN%" seen (updates)
+        self.part = None      # which part is being installed
 
     def write(self, s):
         if self.echo:
@@ -172,6 +173,46 @@ class Runner:
             print("Fader calibration saved.")
         self.bridge.call(do)
         return problems
+
+    def installed(self):
+        """Firmware versions of what's connected now (None: not connected)."""
+        b = self.bridge
+        return {"main": b.mega_version if b.ser else None, "touchscreen": b.pi_version if b.pi_ready else None}
+
+    def install(self, path, force, done):
+        """Install a firmware package (path None = the built-in one): only what's
+        out of date, controller first. The bridge lets go of the port meanwhile."""
+        def work():
+            import fwpack
+            self.updating = True
+            problems = []
+            b = self.bridge
+            have = self.installed()
+            port = b.ser.path if b.ser else b.last_port
+            try:
+                pkg = fwpack.Package(path or lx.firmware_package())
+            except Exception as e:
+                self.updating = False
+                done([str(e)])
+                return
+            b.hold.set()
+            if not b.held.wait(15):
+                problems.append("The bridge didn't let go of the controller.")
+            else:
+                time.sleep(0.5)
+                LOG.part = None
+
+                def progress(part, p):
+                    LOG.part, LOG.progress = part, p
+                try:
+                    problems = fwpack.install(lx, self.cfg, pkg, have, port, force, progress)
+                except Exception as e:
+                    problems.append(str(e))
+            pkg.close()
+            b.hold.clear()
+            self.updating = False
+            done(problems)
+        threading.Thread(target=work, daemon=True).start()
 
     def flash_mega(self, path, done):
         """Mega firmware (path None = the bundled one): the bridge lets go of the
@@ -422,118 +463,171 @@ class ProfilesTab(QWidget):
 
 
 class FirmwareTab(QWidget):
+    """One Install for everything (a firmware package); single parts under
+    Advanced, for recovery."""
+
     def __init__(self, runner, log):
         super().__init__()
         self.runner, self.log = runner, log
         lay = QVBoxLayout(self)
-        box = QGroupBox("Touchscreen (Raspberry Pi)")
+        box = QGroupBox("Firmware")
         b = QVBoxLayout(box)
-        self.version = QLabel()
-        b.addWidget(self.version)
-        b.addWidget(QLabel("Update it over USB with a littlelx-pi-update.zip (from the GitHub build). "
-                           "The old version stays until the new one is complete, so it's safe to unplug."))
+        self.pkg_label = QLabel()
+        self.pkg_label.setWordWrap(True)
+        b.addWidget(self.pkg_label)
+        self.table = QTableWidget(0, 4)
+        self.table.setHorizontalHeaderLabels(["Part", "Installed", "In the package", ""])
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.table.setMaximumHeight(110)
+        b.addWidget(self.table)
         row = QHBoxLayout()
-        self.button = QPushButton("Update from file...")
-        self.button.clicked.connect(self.update)
-        row.addWidget(self.button)
+        self.install_btn = QPushButton("Install")
+        self.install_btn.setDefault(True)
+        self.install_btn.clicked.connect(lambda: self.install(self.pkg_path))
+        self.from_file = QPushButton("Install from file...")
+        self.from_file.clicked.connect(self.install_file)
+        self.force = QCheckBox("Reinstall everything")
+        self.force.toggled.connect(self.show_plan)
+        row.addWidget(self.install_btn)
+        row.addWidget(self.from_file)
+        row.addWidget(self.force)
         row.addStretch()
         b.addLayout(row)
         self.bar = QProgressBar()
         self.bar.setVisible(False)
         b.addWidget(self.bar)
         self.msg = QLabel()
+        self.msg.setWordWrap(True)
         b.addWidget(self.msg)
+        note = QLabel("Only the firmware is replaced: the learned wiring and the active profile stay on the "
+                      "controller. Keep it plugged in until it's done; if anything fails, just install again.")
+        note.setWordWrap(True)
+        note.setStyleSheet("color: gray")
+        b.addWidget(note)
         lay.addWidget(box)
-        mega = QGroupBox("Controller (Arduino Mega)")
-        m = QVBoxLayout(mega)
-        bundled = lx.mega_firmware()
-        info = QLabel("Flash its firmware over USB. Only the program is replaced: the learned wiring and "
-                      "the active profile stay on the controller. "
-                      + ("This app carries the firmware that matches it." if bundled else
-                         "This copy has no firmware built in: use a littlelx_mega .hex from the GitHub build."))
-        info.setWordWrap(True)
-        m.addWidget(info)
-        mrow = QHBoxLayout()
-        self.mega_builtin = QPushButton("Flash the built-in firmware")
-        self.mega_builtin.setEnabled(bool(bundled))
-        self.mega_builtin.clicked.connect(lambda: self.flash(None))
-        self.mega_file = QPushButton("Flash from file...")
-        self.mega_file.clicked.connect(self.flash_file)
-        mrow.addWidget(self.mega_builtin)
-        mrow.addWidget(self.mega_file)
-        mrow.addStretch()
-        m.addLayout(mrow)
-        self.mbar = QProgressBar()
-        self.mbar.setVisible(False)
-        m.addWidget(self.mbar)
-        self.mmsg = QLabel()
-        self.mmsg.setWordWrap(True)
-        m.addWidget(self.mmsg)
-        lay.addWidget(mega)
-        ma = QGroupBox("grandMA3 plugin")
-        a = QVBoxLayout(ma)
-        a.addWidget(QLabel(f"The bridge puts its code into MA by itself (version {runner.bridge.ma_code_version()})."))
-        again = QPushButton("Install into MA again")
+        adv = QGroupBox("Advanced: one part at a time")
+        a = QHBoxLayout(adv)
+        mega = QPushButton("Controller from a .hex...")
+        mega.clicked.connect(self.flash_file)
+        touch = QPushButton("Touchscreen from a .zip...")
+        touch.clicked.connect(self.update_file)
+        again = QPushButton("Put the code into MA again")
         again.clicked.connect(lambda: runner.bridge.call(runner.bridge.install_ma3))
-        a.addWidget(again, 0, Qt.AlignLeft)
-        lay.addWidget(ma)
+        for w in (mega, touch, again):
+            a.addWidget(w)
+        a.addStretch()
+        self.single = (mega, touch)
+        lay.addWidget(adv)
         lay.addStretch()
+        self.pkg_path = lx.firmware_package()
+        self.pkg = None
+        self.load_package(self.pkg_path)
+        self.last_have = None
+
+    def load_package(self, path):
+        import fwpack
+        if self.pkg:
+            self.pkg.close()
+        self.pkg = None
+        if path:
+            try:
+                self.pkg = fwpack.Package(path)
+            except fwpack.PackageError as e:
+                self.msg.setText(str(e))
+        if self.pkg:
+            built_in = path == lx.firmware_package()
+            self.pkg_label.setText(f"Firmware package <b>{self.pkg.version}</b>" +
+                                   (" (built into this app)" if built_in else f" ({os.path.basename(path)})"))
+        else:
+            self.pkg_label.setText("This copy of the app has no firmware built in: use <b>Install from file</b> "
+                                   "with a littlelx-firmware .lxfw from the GitHub build.")
+        self.show_plan()
+
+    def show_plan(self):
+        import fwpack
+        have = self.runner.installed()
+        self.last_have = have
+        rows = fwpack.plan(self.pkg, have, self.force.isChecked()) if self.pkg else \
+            [(p, have.get(p), None, "") for p in fwpack.PARTS]
+        self.table.setRowCount(len(rows))
+        for r, (part, inst, new, action) in enumerate(rows):
+            if part == "main" and inst is None:
+                inst_text = "not connected"
+            else:
+                inst_text = inst or ("not connected" if part == "touchscreen" else "-")
+            for c, t in enumerate((fwpack.NAMES[part], inst_text, new or "-", action)):
+                self.table.setItem(r, c, QTableWidgetItem(t))
+        todo = [r for r in rows if r[3] == "install"]
+        busy = self.runner.updating
+        self.install_btn.setEnabled(bool(self.pkg) and bool(todo) and not busy and have.get("main") is not None)
+        self.install_btn.setText("Install" if todo or not self.pkg else "Up to date")
+        for w in (self.from_file,) + self.single:
+            w.setEnabled(not busy)
 
     def refresh(self):
-        s = self.runner.status()
-        self.version.setText(f"Firmware: {s['touchscreen'] or 'not connected'}")
         if self.runner.updating:
             self.bar.setValue(self.log.progress or 0)
-            self.mbar.setValue(self.log.progress or 0)
+            part = getattr(self.log, "part", None)
+            self.msg.setText({"main": "Installing: controller...", "touchscreen": "Installing: touchscreen..."}
+                             .get(part, "Installing..."))
+        elif self.runner.installed() != self.last_have:
+            self.show_plan()
 
-    def flash_file(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Mega firmware", "", "Arduino firmware (*.hex)")
+    def install_file(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Firmware package", "", "littlelx firmware (*.lxfw)")
         if path:
-            self.flash(path)
+            self.pkg_path = path
+            self.load_package(path)
+            if self.pkg and self.install_btn.isEnabled():
+                self.install(path)
 
-    def flash(self, path):
-        if self.runner.updating:
-            return
-        if QMessageBox.question(self, "littlelx", "Flash the controller's firmware now? Keep it plugged in "
-                                "until it's done (about 10 seconds).") != QMessageBox.Yes:
-            return
-        for b in (self.mega_builtin, self.mega_file, self.button):
-            b.setEnabled(False)
-        self.mbar.setVisible(True)
-        self.mbar.setValue(0)
-        self.log.progress = 0
-        self.mmsg.setText("Flashing...")
-
-        def done(err):
-            QTimer.singleShot(0, lambda: self.flashed(err))
-        self.runner.flash_mega(path, done)
-
-    def flashed(self, err):
-        self.mega_builtin.setEnabled(bool(lx.mega_firmware()))
-        self.mega_file.setEnabled(True)
-        self.button.setEnabled(True)
-        self.mbar.setVisible(False)
-        self.mmsg.setText(f"<span style='color:#c0392b'>{err}</span>" if err else
-                          "Flashed and verified. The controller restarts and the bridge reconnects.")
-
-    def update(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Touchscreen update", "", "littlelx update (*.zip)")
-        if not path:
-            return
-        self.button.setEnabled(False)
-        self.bar.setVisible(True)
+    def busy(self, on):
+        self.bar.setVisible(on)
         self.bar.setValue(0)
         self.log.progress = 0
-        self.msg.setText("Updating... (keep the controller plugged in)")
+        for w in (self.install_btn, self.from_file) + self.single:
+            w.setEnabled(not on)
 
-        def done(err):
-            QTimer.singleShot(0, lambda: self.finished(err))
-        self.runner.update_pi(path, done)
+    def install(self, path):
+        if self.runner.updating:
+            return
+        if QMessageBox.question(self, "littlelx", "Install the firmware now? Keep the controller plugged in "
+                                "until it's done (a minute or so with the touchscreen).") != QMessageBox.Yes:
+            return
+        self.busy(True)
+        self.msg.setText("Installing...")
 
-    def finished(self, err):
-        self.button.setEnabled(True)
-        self.bar.setVisible(False)
-        self.msg.setText(f"<span style='color:#c0392b'>{err}</span>" if err else "Updated.")
+        def done(problems):
+            QTimer.singleShot(0, lambda: self.finished(problems))
+        self.runner.install(path, self.force.isChecked(), done)
+
+    def finished(self, problems):
+        self.busy(False)
+        if problems:
+            self.msg.setText("<span style='color:#c0392b'>" + "<br>".join(problems) + "</span>")
+        else:
+            self.msg.setText("Installed. The controller and touchscreen restart; the bridge reconnects.")
+        self.force.setChecked(False)
+        QTimer.singleShot(4000, self.show_plan)
+
+    # ---- advanced: single parts
+    def flash_file(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Controller firmware", "", "Arduino firmware (*.hex)")
+        if not path or self.runner.updating:
+            return
+        self.busy(True)
+        self.msg.setText("Flashing the controller...")
+        self.runner.flash_mega(path, lambda err: QTimer.singleShot(0, lambda: self.finished([err] if err else [])))
+
+    def update_file(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Touchscreen update", "", "littlelx update (*.zip)")
+        if not path or self.runner.updating:
+            return
+        self.busy(True)
+        self.msg.setText("Updating the touchscreen...")
+        self.runner.update_pi(path, lambda err: QTimer.singleShot(0, lambda: self.finished([err] if err else [])))
 
 
 class CalibrationTab(QWidget):

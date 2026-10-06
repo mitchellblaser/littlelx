@@ -667,7 +667,9 @@ def connect(cfg, verbose=True, stop=None):
                     if kind == "call":
                         line()  # the app's request (see Bridge.call)
                     if kind == "mega" and src is p and line.startswith("HELLO littlelx-mega"):
-                        print(f"Mega connected on {path}")
+                        parts = line.split()
+                        p.mega_version = parts[3] if len(parts) > 3 else "old"  # before versions
+                        print(f"Mega connected on {path} (firmware {p.mega_version})")
                         return p
                     if not asked and time.time() - start > 2:
                         p.send("?")  # in case it did not reset
@@ -2005,6 +2007,7 @@ class Bridge:
         self.pi_proto = 0
         self.pi_version = ""
         self.last_port = None                # where the controller was (Mega flashing)
+        self.mega_version = None             # its firmware, from its HELLO
         self.raw_analog = {}                 # Mega analog channel -> last raw reading
         self.last_sent = ""                  # the last OSC message sent (top bar, generic)
         self.fb = dict(fader={}, fader_name={}, fader_color={}, button={}, button_label={}, lit={},
@@ -2920,6 +2923,7 @@ class Bridge:
             if self.ser is None:
                 continue
             self.last_port = self.ser.path
+            self.mega_version = getattr(self.ser, "mega_version", None)
             self.pi_ready = False
             self.pi_heard = 0.0
             try:
@@ -3283,10 +3287,65 @@ def save_probe(lines):
     return PROBE_PATH
 
 
-def mega_firmware():
-    """The Mega firmware bundled with this build (the app / .exe), if any."""
-    path = resource("firmware", "littlelx_mega.hex")
+def firmware_package():
+    """The firmware package (.lxfw: every part) bundled with this build, if any."""
+    path = resource("firmware", "littlelx-firmware.lxfw")
     return path if os.path.exists(path) else None
+
+
+def mega_firmware():
+    """The Mega firmware bundled with this build (from its package), if any."""
+    path = resource("firmware", "littlelx_mega.hex")
+    if os.path.exists(path):
+        return path
+    if firmware_package():
+        import fwpack
+        part = fwpack.Package(firmware_package()).parts.get("main")
+        return part and part["path"]
+    return None
+
+
+def installed_versions(cfg):
+    """Ask the connected controller and touchscreen for their firmware versions."""
+    ser = connect(cfg)
+    found = {"main": getattr(ser, "mega_version", None), "touchscreen": None}
+    for _ in range(4):
+        ser.send(">?")
+        line = wait_line(ser, lambda l: l.startswith(">HELLO littlelx-pi"), 1.5)
+        if line:
+            parts = line.split()
+            found["touchscreen"] = parts[5] if len(parts) > 5 else "old"
+            break
+    found["port"] = ser.path
+    ser.close()
+    time.sleep(0.5)
+    return found
+
+
+def install_cli(cfg, path, force):
+    import fwpack
+    path = path or firmware_package()
+    if not path:
+        sys.exit("No firmware package given, and none is bundled with this bridge "
+                 "(download littlelx-firmware from the GitHub build).")
+    try:
+        pkg = fwpack.Package(path)
+    except fwpack.PackageError as e:
+        sys.exit(str(e))
+    print(f"Firmware package {pkg.version}")
+    have = installed_versions(cfg)
+    for part, inst, new, action in fwpack.plan(pkg, have, force):
+        print(f"  {fwpack.NAMES[part]:<20} {inst or '-':<24} -> {new or '-':<24} {action}")
+    shown = {}
+
+    def progress(part, p):
+        if shown.get(part) != p:
+            shown[part] = p
+            print(f"\r  {p:3d}%", end="\n" if p >= 100 else "", flush=True)
+    problems = fwpack.install(sys.modules[__name__], cfg, pkg, have, have["port"], force, progress)
+    pkg.close()
+    if problems:
+        sys.exit(1)
 
 
 def flash_mega(cfg, path=None, port=None, progress=None):
@@ -3471,138 +3530,142 @@ def update_pi(cfg, path):
     files = {n: z.read(n) for n in names}
 
     ser = connect(cfg)
+    try:  # always let go of the controller: the app's bridge takes it back after
 
-    def wait(prefixes, timeout):
-        end = time.time() + timeout
-        while time.time() < end:
-            try:
-                kind, src, line = events.get(timeout=0.2)
-            except queue.Empty:
-                continue
-            if kind == "lost" and src is ser:
-                sys.exit("Controller disconnected during the update. The Pi still runs the old version; try again.")
-            if kind == "mega" and src is ser:
-                if line.startswith(">UPD FAIL"):
-                    raise UpdateFailed("touchscreen reported " + line[10:])
-                for p in prefixes:
-                    if line.startswith(p):
-                        return line
-        return None
+        def wait(prefixes, timeout):
+            end = time.time() + timeout
+            while time.time() < end:
+                try:
+                    kind, src, line = events.get(timeout=0.2)
+                except queue.Empty:
+                    continue
+                if kind == "lost" and src is ser:
+                    sys.exit("Controller disconnected during the update. The Pi still runs the old version; try again.")
+                if kind == "mega" and src is ser:
+                    if line.startswith(">UPD FAIL"):
+                        raise UpdateFailed("touchscreen reported " + line[10:])
+                    for p in prefixes:
+                        if line.startswith(p):
+                            return line
+            return None
 
-    def hello():
-        for _ in range(8):
-            ser.send(">?")
-            h = wait([">HELLO"], 2)
-            if h:
-                return h
-        return None
+        def hello():
+            for _ in range(8):
+                ser.send(">?")
+                h = wait([">HELLO"], 2)
+                if h:
+                    return h
+            return None
 
-    print("Looking for the touchscreen...")
-    h = hello()
-    if not h:
-        sys.exit("The touchscreen isn't answering. Is it powered and showing 'waiting for computer'?")
-    parts = h.split()
-    old_ver = parts[5] if len(parts) > 5 else "old"
-    if len(parts) <= 5 or parts[2] == "1":
-        sys.exit("This touchscreen firmware is too old to update over USB; flash the SD card once instead.")
-    proto = int(parts[2]) if parts[2].isdigit() else 2
-    print(f"Touchscreen firmware {old_ver} -> {new_ver}")
-    rate = PI_RATE * 0.72  # payload rate after base64 and line overhead
+        print("Looking for the touchscreen...")
+        h = hello()
+        if not h:
+            sys.exit("The touchscreen isn't answering. Is it powered and showing 'waiting for computer'?")
+        parts = h.split()
+        old_ver = parts[5] if len(parts) > 5 else "old"
+        if len(parts) <= 5 or parts[2] == "1":
+            sys.exit("This touchscreen firmware is too old to update over USB; flash the SD card once instead.")
+        proto = int(parts[2]) if parts[2].isdigit() else 2
+        print(f"Touchscreen firmware {old_ver} -> {new_ver}")
+        rate = PI_RATE * 0.72  # payload rate after base64 and line overhead
 
-    def send(line):
-        ser.send(">" + line)  # Port.send checksums (protocol 3+) and paces
+        def send(line):
+            ser.send(">" + line)  # Port.send checksums (protocol 3+) and paces
 
-    def attempt():
-        total = sum(len(d) for d in files.values())
-        send(f"UPD BEGIN {total}")
-        if not wait([">UPD READY"], 20):
-            raise UpdateFailed("no answer to BEGIN")
-        CHUNK = 192
-        done = 0
-        for n, data in files.items():
-            send(f"UPD FILE {n} {len(data)} {zlib.crc32(data) & 0xffffffff:08x}")
-            r = wait([">UPD HAVE", ">UPD SEND"], 30)
-            if not r:
-                raise UpdateFailed(f"no answer for {n}")
-            if r.startswith(">UPD SEND"):
-                print(f"\r  sending {n} ({len(data) / 1024:.0f} KB, about {len(data) / rate:.0f} s)" + " " * 10)
-            for again in range(4):
-                if not r.startswith(">UPD SEND"):
-                    break
-                if again:
-                    print(f"\r  {n} arrived damaged, sending it again" + " " * 20)
-                if proto >= 3:
-                    # go-back-N: chunks carry their offset (and a CRC-32 on
-                    # protocol 4); the Pi acks how much it has and anything
-                    # lost or damaged is simply sent again
-                    pos = nxt = 0
-                    rewound, tries = False, 0
-                    while pos < len(data):
-                        while nxt < len(data) and nxt - pos < 4 * CHUNK:
-                            chunk = data[nxt:nxt + CHUNK]
-                            crc = f"{zlib.crc32(chunk) & 0xffffffff:08x} " if proto >= 4 else ""
-                            send(f"UPD DAT {nxt} {crc}" + base64.b64encode(chunk).decode())
-                            nxt = min(nxt + CHUNK, len(data))
-                        r2 = wait([">UPD ACK"], 2)
-                        a = int(r2.split()[2]) if r2 else None
-                        if a is None or (a == pos and not rewound):
-                            tries += 1
-                            if tries > 40:
-                                raise UpdateFailed("the link keeps failing")
-                            nxt, rewound = pos, True  # resend from what the Pi has
-                        elif a > pos:
-                            pos, rewound, tries = a, False, 0
-                            print(f"\r  {(done + pos) * 100 // total:3d}%  {n:<28}", end="", flush=True)
-                else:
-                    # older firmware: no repair possible, small window
-                    pos, inflight = 0, []
-                    while pos < len(data) or inflight:
-                        while pos < len(data) and len(inflight) < 2:
-                            chunk = data[pos:pos + CHUNK]
-                            send("UPD DATA " + base64.b64encode(chunk).decode())
-                            inflight.append(len(chunk))
-                            pos += len(chunk)
-                        if wait([">UPD ACK"], 15) is None:
-                            raise UpdateFailed("transfer stalled")
-                        inflight.pop(0)
-                        print(f"\r  {(done + pos - sum(inflight)) * 100 // total:3d}%  {n:<28}",
-                              end="", flush=True)
-                # the new firmware answers a file that failed its CRC with SEND again
-                r = wait([">UPD OK", ">UPD SEND"], 30)
+        def attempt():
+            total = sum(len(d) for d in files.values())
+            send(f"UPD BEGIN {total}")
+            if not wait([">UPD READY"], 20):
+                raise UpdateFailed("no answer to BEGIN")
+            CHUNK = 192
+            done = 0
+            for n, data in files.items():
+                send(f"UPD FILE {n} {len(data)} {zlib.crc32(data) & 0xffffffff:08x}")
+                r = wait([">UPD HAVE", ">UPD SEND"], 30)
                 if not r:
-                    raise UpdateFailed(f"{n} wasn't confirmed")
-            if r.startswith(">UPD SEND"):
-                raise UpdateFailed(f"{n} kept arriving damaged")
-            done += len(data)
-        print(f"\r  100%  {'all files sent':<28}")
-        send(f"UPD COMMIT {len(files)}")
-        if not wait([">UPD DONE"], 60):
-            raise UpdateFailed("the switch wasn't confirmed")
+                    raise UpdateFailed(f"no answer for {n}")
+                if r.startswith(">UPD SEND"):
+                    print(f"\r  sending {n} ({len(data) / 1024:.0f} KB, about {len(data) / rate:.0f} s)" + " " * 10)
+                for again in range(4):
+                    if not r.startswith(">UPD SEND"):
+                        break
+                    if again:
+                        print(f"\r  {n} arrived damaged, sending it again" + " " * 20)
+                    if proto >= 3:
+                        # go-back-N: chunks carry their offset (and a CRC-32 on
+                        # protocol 4); the Pi acks how much it has and anything
+                        # lost or damaged is simply sent again
+                        pos = nxt = 0
+                        rewound, tries = False, 0
+                        while pos < len(data):
+                            while nxt < len(data) and nxt - pos < 4 * CHUNK:
+                                chunk = data[nxt:nxt + CHUNK]
+                                crc = f"{zlib.crc32(chunk) & 0xffffffff:08x} " if proto >= 4 else ""
+                                send(f"UPD DAT {nxt} {crc}" + base64.b64encode(chunk).decode())
+                                nxt = min(nxt + CHUNK, len(data))
+                            r2 = wait([">UPD ACK"], 2)
+                            a = int(r2.split()[2]) if r2 else None
+                            if a is None or (a == pos and not rewound):
+                                tries += 1
+                                if tries > 40:
+                                    raise UpdateFailed("the link keeps failing")
+                                nxt, rewound = pos, True  # resend from what the Pi has
+                            elif a > pos:
+                                pos, rewound, tries = a, False, 0
+                                print(f"\r  {(done + pos) * 100 // total:3d}%  {n:<28}", end="", flush=True)
+                    else:
+                        # older firmware: no repair possible, small window
+                        pos, inflight = 0, []
+                        while pos < len(data) or inflight:
+                            while pos < len(data) and len(inflight) < 2:
+                                chunk = data[pos:pos + CHUNK]
+                                send("UPD DATA " + base64.b64encode(chunk).decode())
+                                inflight.append(len(chunk))
+                                pos += len(chunk)
+                            if wait([">UPD ACK"], 15) is None:
+                                raise UpdateFailed("transfer stalled")
+                            inflight.pop(0)
+                            print(f"\r  {(done + pos - sum(inflight)) * 100 // total:3d}%  {n:<28}",
+                                  end="", flush=True)
+                    # the new firmware answers a file that failed its CRC with SEND again
+                    r = wait([">UPD OK", ">UPD SEND"], 30)
+                    if not r:
+                        raise UpdateFailed(f"{n} wasn't confirmed")
+                if r.startswith(">UPD SEND"):
+                    raise UpdateFailed(f"{n} kept arriving damaged")
+                done += len(data)
+            print(f"\r  100%  {'all files sent':<28}")
+            send(f"UPD COMMIT {len(files)}")
+            if not wait([">UPD DONE"], 60):
+                raise UpdateFailed("the switch wasn't confirmed")
 
-    for tryno in range(1, 6):
-        try:
-            attempt()
-            break
-        except UpdateFailed as e:
-            send("UPD ABORT")
-            print(f"\n  Attempt {tryno} failed ({e}); nothing was changed.")
-            if tryno == 5:
-                sys.exit("Giving up after 5 attempts: the serial link to the Pi is too unreliable. "
-                         "Check the wiring, or flash the SD card instead.")
-            print("  Trying again...")
-            time.sleep(2)
-            if not hello():
-                sys.exit("The touchscreen stopped answering.")
-    print("Installed. The touchscreen is restarting...")
-    end = time.time() + 90
-    while time.time() < end:
-        ser.send(">?")
-        h = wait([">HELLO"], 3)
-        if h:
-            v = h.split()[5] if len(h.split()) > 5 else "?"
-            print(f"Touchscreen is back, running {v}.")
-            return
-    print("The touchscreen hasn't come back yet. If it stays blank, see 'Pi updates' in the README.")
+        for tryno in range(1, 6):
+            try:
+                attempt()
+                break
+            except UpdateFailed as e:
+                send("UPD ABORT")
+                print(f"\n  Attempt {tryno} failed ({e}); nothing was changed.")
+                if tryno == 5:
+                    sys.exit("Giving up after 5 attempts: the serial link to the Pi is too unreliable. "
+                             "Check the wiring, or flash the SD card instead.")
+                print("  Trying again...")
+                time.sleep(2)
+                if not hello():
+                    sys.exit("The touchscreen stopped answering.")
+        print("Installed. The touchscreen is restarting...")
+        end = time.time() + 90
+        while time.time() < end:
+            ser.send(">?")
+            h = wait([">HELLO"], 3)
+            if h:
+                v = h.split()[5] if len(h.split()) > 5 else "?"
+                print(f"Touchscreen is back, running {v}.")
+                return
+        print("The touchscreen hasn't come back yet. If it stays blank, see 'Pi updates' in the README.")
+    finally:
+        ser.close()
+        time.sleep(0.3)
 
 
 def main():
@@ -3615,6 +3678,10 @@ def main():
     ap.add_argument("--test-faders", action="store_true", help="find the fader format MA3 accepts")
     ap.add_argument("--ma-probe", action="store_true", help="show what MA's Lua offers (encoder diagnostics)")
     ap.add_argument("--profiles", action="store_true", help=f"list the profiles (files in {PROFILE_DIR})")
+    ap.add_argument("--install", metavar="FILE.lxfw", nargs="?", const="",
+                    help="install the firmware package: controller, touchscreen (only what's out of date; "
+                         "default: the one bundled with this build)")
+    ap.add_argument("--reinstall", action="store_true", help="with --install: install every part again")
     ap.add_argument("--flash-mega", metavar="FILE.hex", nargs="?", const="",
                     help="flash the Arduino Mega firmware (default: the one bundled with this build)")
     ap.add_argument("--use-profile", metavar="NAME", help="make a profile active and store it on the controller")
@@ -3647,6 +3714,8 @@ def main():
             test_faders(cfg)
         elif args.ma_probe:
             ma_probe(cfg)
+        elif args.install is not None:
+            install_cli(cfg, args.install, args.reinstall)
         elif args.flash_mega is not None:
             flash_mega_cli(cfg, args.flash_mega)
         elif args.profiles:
