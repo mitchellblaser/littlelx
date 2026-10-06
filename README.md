@@ -263,8 +263,10 @@ one and click it to use it. On the number pad, clicking the encoder is Set. Valu
 named range show as its name, like MA's encoder bar. With
 nothing selected in MA they fall back to what's set in the config (Dimmer and
 Page). If the page stays on
-"Select fixtures in MA" although fixtures are selected, run
-`littlelx.py --ma-probe` (with the bridge stopped) and send the output.
+"Select fixtures in MA" although fixtures are selected (or values look wrong),
+tap **Setup > MA probe** on the touchscreen (or run `littlelx.py --ma-probe` with
+the bridge stopped): it saves what MA's Lua offers to `littlelx-probe.txt` in
+your home folder - send that file.
 
 Encoders are counted on the computer, and a click only counts once the knob
 settles into its detent (wiggling does nothing). If an encoder needs two clicks

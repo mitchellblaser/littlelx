@@ -458,7 +458,7 @@ local function probe()
 	end
 	for _, f in ipairs({ "SelectedFeature", "SelectionFirst", "GetAttributeIndex", "GetUIChannelIndex",
 		"GetProgPhaser", "GetUIChannel", "GetRTChannel", "CurrentProfile", "ShowData" }) do
-		say(f, type(_G[f]))
+		say(f, type(_G and _G[f]))
 	end
 	local feat = try(SelectedFeature)
 	say("feature:", oname(feat), "group:", feat and feature_group(feat))
@@ -567,8 +567,13 @@ local function probe()
 			if rt then dump("GetRTChannel", try(GetRTChannel, rt)) else say("no rt channel index in GetUIChannel") end
 		end
 	end
-	for _, l in ipairs(out) do Printf("littlelx probe: " .. l) end
-	send("probe", "s", table.concat(out, " / "))
+	-- one OSC message per line (one big one is too long to arrive), then an
+	-- end marker: the bridge saves them to a file
+	for _, l in ipairs(out) do
+		Printf("littlelx probe: " .. l)
+		send("probe", "s", l:sub(1, 400))
+	end
+	send("probe_end", "i", #out)
 end
 
 local function report(force)

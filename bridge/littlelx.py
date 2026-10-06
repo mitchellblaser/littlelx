@@ -727,7 +727,7 @@ class Screen:
     ENC_FEAT, ENC_PAGE = 86, 87
     ENC_TAB0, TABS_SHOWN = 88, 4   # feature tabs (the last one pages when there are more)
     BACK = 120
-    SET_TITLE, SET_RESET, SET_MORE = 121, 122, 123
+    SET_TITLE, SET_RESET, SET_MORE, SET_PROBE = 121, 122, 123, 124
     SET0 = 125     # setup grids (keys, functions, digits); named values from SET0 + 20
     # (the Pi has 160 widget ids: keep everything below that)
 
@@ -1259,8 +1259,11 @@ class Screen:
             self.widget(wid, "B", 4 + c * bw, gy + r * bh, bw - 3, bh - 4, C_BTN if learnt else C_PANEL,
                         C_TEXT if learnt else C_DIM, C_BTN_ON, 0, 0, 0, f"{k + 1}\n{what}")
         self.keymap[self.SET_RESET] = {"reset_keys": True}
-        self.widget(self.SET_RESET, "B", 4, self.h - 104, w - 8, 40, C_PANEL, C_DIM, C_BTN_ON, 0, 0, 0,
+        self.widget(self.SET_RESET, "B", 4, self.h - 104, w - 112, 40, C_PANEL, C_DIM, C_BTN_ON, 0, 0, 0,
                     "Set all keys back to defaults")
+        self.keymap[self.SET_PROBE] = {"probe": True}
+        self.widget(self.SET_PROBE, "B", w - 104, self.h - 104, 100, 40, C_PANEL, C_DIM, C_BTN_ON, 0, 0, 0,
+                    "MA probe")
         self.back_button()
 
     def draw_key_editor(self, i):
@@ -1434,6 +1437,14 @@ class Screen:
                 self.value_entry += k
             self.setw(self.SET_TITLE, text=self.value_title(i))
             return
+        if "probe" in act:
+            if self.b.ma_linked():
+                self.b.probe_lines = []
+                self.b.ma_plugin("probe")
+                self.setw(self.SET_TITLE, text="Asking MA...\n(saved to a file on the computer)")
+            else:
+                self.setw(self.SET_TITLE, text="MA isn't linked:\nno probe possible")
+            return
         if "reset_keys" in act:
             if time.time() - self.reset_armed > 4:  # first tap: ask for a second one
                 self.reset_armed = time.time()
@@ -1472,7 +1483,7 @@ class Screen:
     def on_release(self, wid):
         act = self.keymap.get(wid)
         if act and not any(k in act for k in ("keypad", "back", "encpage", "tab", "tabpage", "edit", "assign",
-                                              "digit", "reset_keys", "entry", "vkey", "setv", "setpage")):
+                                              "digit", "reset_keys", "entry", "vkey", "setv", "setpage", "probe")):
             self.b.do_action(act, False)
 
     def local_key(self, k):
@@ -1559,6 +1570,7 @@ class Bridge:
                        sets={},  # attribute -> named values of the selected fixture
                        tabs=[])  # the feature group's features the fixture has  # MA's encoders (see report_encoders)
         self.keys_down = set()               # hardware keys whose press was acted on
+        self.probe_lines = []                # MA probe answer being received
         self.enc_page = 0                    # which pair of MA's encoders the hardware ones follow
         self.enc_edge_at = [0.0, 0.0]        # encoder click-size auto-detection
         self.enc_checked = [0.0, 0.0]
@@ -2152,7 +2164,13 @@ class Bridge:
         elif what == "ver":
             ma["ver"] = str(val or "")
         elif what == "probe":
-            print("MA probe:\n  " + str(val or "").replace(" / ", "\n  "))
+            self.probe_lines.append(str(val or ""))
+        elif what == "probe_end":
+            path = save_probe(self.probe_lines)
+            self.probe_lines = []
+            print(f"MA probe saved to {path} - open it there and copy everything.")
+            if scr and scr.name == "setup":
+                scr.setw(scr.SET_TITLE, text=f"MA probe saved on the computer:\n{path}")
         elif what.startswith("res/"):
             ma["res"][what.split("/", 1)[1]] = float(val or 1)
             if scr:
@@ -2535,6 +2553,17 @@ def calibrate(cfg):
     print("Saved.")
 
 
+PROBE_PATH = os.path.join(os.path.expanduser("~"), "littlelx-probe.txt")
+
+
+def save_probe(lines):
+    """Save MA's probe answer as a plain text file (easy to copy from)."""
+    with open(PROBE_PATH, "w") as f:
+        f.write(f"littlelx MA probe, {time.strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+        f.write("\n".join(lines) + "\n")
+    return PROBE_PATH
+
+
 def ma_probe(cfg):
     """Ask the littlelx code in MA what its Lua offers (encoder diagnostics)."""
     o = cfg["osc"]
@@ -2548,7 +2577,7 @@ def ma_probe(cfg):
     cmd = 'Lua "' + Bridge.MA_RUN.replace("{arg}", "probe") + '"'
     tx.sendto(osc_message(o["prefix"].rstrip("/") + "/cmd", cmd), (o["host"], int(o["port"])))
     print("Asked MA (needs the bridge to have installed its code at least once)...")
-    end = time.time() + 6
+    lines, end = [], time.time() + 8
     while time.time() < end:
         try:
             data, _ = rx.recvfrom(65536)
@@ -2556,10 +2585,15 @@ def ma_probe(cfg):
             continue
         for addr, args in osc_parse(data):
             if addr.endswith("/littlelx/probe") and args:
-                print("\n" + str(args[0]).replace(" / ", "\n"))
-                print("\nThe same lines are in MA's System Monitor (littlelx probe: ...).")
-                return
-    print("No answer. The lines may still be in MA's System Monitor (littlelx probe: ...).")
+                lines.append(str(args[0]))
+                end = time.time() + 3  # more coming
+            elif addr.endswith("/littlelx/probe_end"):
+                end = 0
+    if not lines:
+        sys.exit("No answer. Is MA's OSC line that sends to this computer set up? (The touchscreen's"
+                 " Setup > MA probe works while the bridge runs.)")
+    print("\n".join(lines))
+    print(f"\nSaved to {save_probe(lines)} - open it there and copy everything.")
 
 
 def test_faders(cfg):
