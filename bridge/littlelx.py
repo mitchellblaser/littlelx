@@ -46,8 +46,14 @@ CONFIG_PATH = os.path.expanduser("~/.littlelx.json")
 
 
 def bridge_version():
-    """git version of this checkout (or 'unknown', e.g. inside the .exe)."""
+    """git version of this checkout, or the one stamped into a built app."""
     import subprocess
+    if getattr(sys, "_MEIPASS", None):  # a built .exe / .app: VERSION is bundled
+        try:
+            with open(os.path.join(sys._MEIPASS, "VERSION")) as f:
+                return f.read().strip() or "unknown"
+        except OSError:
+            return "unknown"
     try:
         here = os.path.dirname(os.path.abspath(__file__))
         return subprocess.run(["git", "-C", here, "describe", "--always", "--dirty"],

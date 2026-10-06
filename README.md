@@ -204,6 +204,38 @@ shortcut to `littlelx.exe` in `shell:startup` (Win+R → `shell:startup`).
 
 It reconnects by itself when the controller is unplugged and plugged back in.
 
+## The littlelx app (tray / menu bar)
+
+The bridge as an app: it lives in the **system tray** (Windows) or the **menu
+bar** (macOS) and runs the bridge in the background - no terminal window. Its
+menu shows whether the controller, touchscreen and MA (or your OSC target) are
+there, switches profiles, and opens the littlelx window:
+
+* **Status** - controller, touchscreen, profile, where it sends to, the link.
+* **Profiles** - make one active (it's stored on the controller too), edit in
+  the Builder, new, duplicate, rename, delete, import / export, open the folder.
+* **Builder** - edit a profile with forms: connection, faders, the 20 keys
+  (laid out like the controller), the touchscreen's buttons, encoders, your own
+  screens and keypad, the look (top bar, colours) and feedback. The JSON tab
+  shows the whole file for anything else. **Open** picks any profile to edit,
+  **Save as copy** saves it under a new name, **Save & make active** uses it
+  straight away.
+* **Firmware** - update the touchscreen from a littlelx-pi-update.zip.
+* **Calibration** - fader bottom / top (live readings) and the touchscreen.
+* **Log** - what the bridge reports (also in `littlelx.log` in your home folder).
+
+Closing the window keeps it running; **Quit** is in the tray / menu bar menu.
+
+**Get it:** the GitHub build (Actions) makes `littlelx-app.exe` (Windows, in
+`littlelx-windows`) and `littlelx.app` (macOS, `littlelx-mac.zip`; the first
+time, right-click it and choose Open - it isn't signed). From the source:
+
+    pip install pyside6 pyserial
+    python3 bridge/app.py
+
+The command-line bridge (`littlelx.py`) still works on its own; don't run both
+at once. Learning the wiring is still done with `littlelx.py --learn`.
+
 ## Updating the touchscreen over USB
 
 No need to take the SD card out. Stop the bridge if it's running, then:
