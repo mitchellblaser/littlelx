@@ -1,0 +1,354 @@
+{
+  "name": "Luna",
+  "connection": {
+    "type": "generic",
+    "host": "127.0.0.1",
+    "port": 8000,
+    "prefix": "",
+    "listen_port": 9000,
+    "fader_type": "i",
+    "generic": {
+      "fader": "/luna/fader/{n}",
+      "key": "/luna/key/{n}",
+      "encoder": "/luna/encoder/{n}",
+      "push": "/luna/encoder/{n}/push",
+      "button": "/luna/button/{n}",
+      "page": "/luna/page/{n}",
+      "command": "/luna/cmd",
+      "set": "/luna/encoder/{n}/set"
+    },
+    "values": {
+      "fader": [
+        0,
+        1
+      ],
+      "key": [
+        1,
+        0
+      ],
+      "button": [
+        1,
+        0
+      ],
+      "push": [
+        1,
+        0
+      ],
+      "encoder": 1,
+      "integer": false
+    },
+    "fader_interval": 0.025,
+    "fader_jump": 5
+  },
+  "faders": [
+    {
+      "name": "Fader 1"
+    },
+    {
+      "name": "Fader 2"
+    },
+    {
+      "name": "Fader 3"
+    },
+    {
+      "name": "Fader 4"
+    },
+    {
+      "name": "Fader 5"
+    }
+  ],
+  "keys": [
+    {
+      "page": -1
+    },
+    {
+      "page": 1
+    },
+    {
+      "osc": "/luna/exec/101"
+    },
+    {
+      "osc": "/luna/exec/102"
+    },
+    {
+      "osc": "/luna/exec/103"
+    },
+    {
+      "osc": "/luna/fader/1/button/1"
+    },
+    {
+      "osc": "/luna/fader/2/button/1"
+    },
+    {
+      "osc": "/luna/fader/3/button/1"
+    },
+    {
+      "osc": "/luna/fader/4/button/1"
+    },
+    {
+      "osc": "/luna/fader/5/button/1"
+    },
+    {
+      "osc": "/luna/fader/1/button/2"
+    },
+    {
+      "osc": "/luna/fader/2/button/2"
+    },
+    {
+      "osc": "/luna/fader/3/button/2"
+    },
+    {
+      "osc": "/luna/fader/4/button/2"
+    },
+    {
+      "osc": "/luna/fader/5/button/2"
+    },
+    {
+      "osc": "/luna/fader/1/button/3"
+    },
+    {
+      "osc": "/luna/fader/2/button/3"
+    },
+    {
+      "osc": "/luna/fader/3/button/3"
+    },
+    {
+      "osc": "/luna/fader/4/button/3"
+    },
+    {
+      "osc": "/luna/fader/5/button/3"
+    }
+  ],
+  "encoders": [
+    {
+      "label": "Grand Master",
+      "value": "/luna/gm",
+      "set": "/luna/gm",
+      "click": "pad",
+      "pad": false,
+      "choices": [
+        {
+          "label": "Full",
+          "value": 1.0
+        },
+        {
+          "label": "75%",
+          "value": 0.75
+        },
+        {
+          "label": "50%",
+          "value": 0.5
+        },
+        {
+          "label": "25%",
+          "value": 0.25
+        },
+        {
+          "label": "Out",
+          "value": 0.0
+        }
+      ]
+    },
+    {
+      "label": "Encoder 2",
+      "click": "push"
+    }
+  ],
+  "touch_buttons": [
+    {
+      "label": "Exec 104",
+      "osc": "/luna/exec/104",
+      "lit": "/luna/exec/104"
+    },
+    {
+      "label": "Exec 105",
+      "osc": "/luna/exec/105",
+      "lit": "/luna/exec/105"
+    },
+    {
+      "label": "Exec 106",
+      "osc": "/luna/exec/106",
+      "lit": "/luna/exec/106"
+    },
+    {
+      "label": "Exec 107",
+      "osc": "/luna/exec/107",
+      "lit": "/luna/exec/107"
+    },
+    {
+      "label": "Exec 108",
+      "osc": "/luna/exec/108",
+      "lit": "/luna/exec/108"
+    },
+    {
+      "label": "Exec 109",
+      "osc": "/luna/exec/109",
+      "lit": "/luna/exec/109"
+    },
+    {
+      "label": "Page -",
+      "page": -1
+    },
+    {
+      "label": "Page +",
+      "page": 1
+    },
+    {
+      "label": "Tap",
+      "osc": "/luna/speedmaster/1/tap",
+      "color": "1f5a7a"
+    },
+    {
+      "label": "Speed /2",
+      "osc": "/luna/speedmaster/1/half"
+    },
+    {
+      "label": "Speed x2",
+      "osc": "/luna/speedmaster/1/double"
+    },
+    {
+      "label": "Timing Reset",
+      "osc": "/luna/timingmaster/1/reset"
+    },
+    {
+      "label": "Macros",
+      "screen": "macros"
+    },
+    {
+      "label": "Keypad",
+      "screen": "keypad"
+    },
+    {
+      "label": "Encoders",
+      "screen": "encoders"
+    }
+  ],
+  "pickup": true,
+  "screen": {
+    "left": "Luna  Page {page}",
+    "middle": "sent",
+    "status": "osc",
+    "encoders": "simple",
+    "encoders_title": "Encoders",
+    "encoder_strip": true,
+    "columns": null
+  },
+  "feedback": {
+    "fader": "/luna/fader/{n}",
+    "fader_name": "/luna/fader/{n}/name",
+    "page": "/luna/page"
+  },
+  "screens": {
+    "macros": {
+      "title": "Macros",
+      "columns": 4,
+      "back": "main",
+      "buttons": [
+        {
+          "label": "Macro 1",
+          "osc": "/luna/macro/1"
+        },
+        {
+          "label": "Macro 2",
+          "osc": "/luna/macro/2"
+        },
+        {
+          "label": "Macro 3",
+          "osc": "/luna/macro/3"
+        },
+        {
+          "label": "Macro 4",
+          "osc": "/luna/macro/4"
+        },
+        {
+          "label": "Macro 5",
+          "osc": "/luna/macro/5"
+        },
+        {
+          "label": "Macro 6",
+          "osc": "/luna/macro/6"
+        },
+        {
+          "label": "Macro 7",
+          "osc": "/luna/macro/7"
+        },
+        {
+          "label": "Macro 8",
+          "osc": "/luna/macro/8"
+        },
+        {
+          "label": "Stop 1",
+          "osc": "/luna/macro/1/stop",
+          "color": "5a2a2a"
+        },
+        {
+          "label": "Stop 2",
+          "osc": "/luna/macro/2/stop",
+          "color": "5a2a2a"
+        },
+        {
+          "label": "Stop 3",
+          "osc": "/luna/macro/3/stop",
+          "color": "5a2a2a"
+        },
+        {
+          "label": "Stop 4",
+          "osc": "/luna/macro/4/stop",
+          "color": "5a2a2a"
+        }
+      ]
+    },
+    "keypad": {
+      "type": "keypad",
+      "keys": [
+        [
+          "Fixture",
+          "Group",
+          "7",
+          "8",
+          "9"
+        ],
+        [
+          "Sequence",
+          "Cue",
+          "4",
+          "5",
+          "6"
+        ],
+        [
+          "Preset",
+          "At",
+          "1",
+          "2",
+          "3"
+        ],
+        [
+          "Thru",
+          "Full",
+          "0",
+          ".",
+          {
+            "label": "Enter",
+            "cmdline": "please"
+          }
+        ],
+        [
+          {
+            "label": "Back",
+            "screen": "main"
+          },
+          "Off",
+          "Go+",
+          {
+            "label": "Del",
+            "cmdline": "backspace"
+          },
+          {
+            "label": "Clear",
+            "cmdline": "clear"
+          }
+        ]
+      ]
+    }
+  }
+}

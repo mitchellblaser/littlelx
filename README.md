@@ -293,8 +293,10 @@ A **profile** describes the whole controller: where it talks to (grandMA3, or
 plain OSC to anything else), what each fader, key and encoder does, the
 touchscreen's main buttons and its keypad. Profiles are plain files in the
 `littlelx-profiles` folder in your home folder - edit them in any text editor,
-copy them, share them. Two examples are put there (when missing):
-`grandMA3.json` (the default layout) and `Generic OSC.json`.
+copy them, share them. The examples are put there (when missing):
+`grandMA3.json` (the default layout), `Generic OSC.json` and `Luna.json`
+(Luna's built-in `/luna/...` OSC: faders 1-5 and their three buttons on the
+current page, button executors, pages, Grand Master, macros, keypad).
 
 The **active** profile is also stored on the controller (next to the learned
 wiring), so it travels with it: plug it into another computer and it brings
