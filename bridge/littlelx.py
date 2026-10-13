@@ -3078,6 +3078,11 @@ class Bridge:
         self.ma["fader"], self.ma["run"], self.ma["name"], self.ma["color"] = {}, {}, {}, {}
         for i in range(5):  # new page: catch each fader again before it takes over
             self.picked[i] = not self.cfg.get("pickup", True)
+            # ...unless it already sits at the level known for it: a target that
+            # only reports changes (Luna) says nothing for a fader at the same
+            # level on both pages. A different level reported later makes it
+            # catch that one instead (fader_feedback).
+            self.check_pickup(i)
         self.midi.page_changed()
         if self.pi_ready:
             self.screen.update_header()
