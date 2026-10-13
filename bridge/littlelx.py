@@ -101,6 +101,11 @@ DEFAULTS = {
                     # {"exec": n} actions and faders ({b} = the fader button, from 1)
                     "exec": "/exec/{n}", "exec_button": "/exec/{n}/button/{b}",
                     "exec_fader": "/exec/{n}/fader",
+                    # encoders that follow the target's attribute encoders ("follow": true;
+                    # turns go to "encoder" and pushes to "push", {n} = the target's encoder)
+                    "enc_feature": "",   # the encoder bank to show (its name)
+                    "enc_next": "", "enc_prev": "",   # the bank's next / previous page
+                    "enc_set": "",       # a typed value: a command, {feature} {attribute} {value}
                     "ping": ""},          # sent every 2 s (keeps the link status fresh), "" = none
         # generic: the values sent (and fader feedback read the same way)
         "values": {"fader": [0, 1],     # fader range (bottom, top)
@@ -253,7 +258,7 @@ PROFILE_DIR = os.path.join(os.path.expanduser("~"), "littlelx-profiles")
 CONN_KEYS = ("type", "host", "port", "prefix", "listen_port", "fader_type", "generic", "values",
              "fader_interval", "fader_jump", "ma_line")
 PROFILE_FIELDS = ("faders", "keys", "encoders", "touch_buttons", "keypad", "pickup",
-                  "screen", "feedback", "screens", "midi", "key_choices")
+                  "screen", "feedback", "screens", "midi", "key_choices", "encoder_features")
 
 # What the touchscreen shows, per connection type; a profile's "screen" overrides
 # any of it. Texts may use {page} and {profile}.
@@ -1131,6 +1136,10 @@ class Screen:
             if b.ma_linked():  # whatever is on MA's own line (typed at the desk)
                 line = b.ma["busy"] or b.ma["cmdline"]
                 return "> " + line if line else ">"
+            if b.generic() and b.fb["cmdline"]:  # being typed at the target's desk
+                return "> " + b.fb["cmdline"]
+            if b.generic() and b.fb["cmd_error"]:  # the last line failed: why
+                return f"{b.last_cmd}  ! {b.fb['cmd_error']}"
             return b.last_cmd
         if mode == "sent":
             return b.last_sent
@@ -1355,6 +1364,9 @@ class Screen:
             return "Page", None
         if "cmd" in act:
             return act["cmd"].replace("{d}", "n"), None
+        if self.b.generic() and act.get("label"):  # its label, and value from feedback
+            value = self.b.fb["encoder_value"].get(i)
+            return (f"{act['label']}  {value}" if value else act["label"]), None
         return "-", None
 
     def draw_encoders(self):
@@ -1364,7 +1376,7 @@ class Screen:
         Otherwise (nothing selected in MA) what each encoder is set to."""
         w = self.w
         b = self.b
-        self.enc_simple = b.screen_opt("encoders") == "simple"
+        self.enc_simple = b.screen_opt("encoders") == "simple"  # else "ma" / "follow": the target's encoders
         self.enc_mode = b.ma_encoders_on() and not self.enc_simple
         top = self.header_h() + 4
         self.keymap = {}
@@ -1390,7 +1402,7 @@ class Screen:
             self.widget(base + 4, "L", 4, y, w - 8, 26, C_PANEL, C_DIM, C_PANEL, 0 if not self.enc_mode else 1,
                         1, 0, title)
             vh = ph - 26 - 62
-            if b.enc_click(i) == "pad":
+            if b.enc_click(i) == "pad" or b.generic() and b.following(i):
                 self.keymap[base + 1] = {"entry": i}  # tap the value to set one
             self.widget(base + 1, "B", 8, y + 28, w - 16, vh, C_PANEL, C_TEXT, C_PANEL, 2, 0, 0, "")
             by, bh = y + 30 + vh, ph - 30 - vh - 10
@@ -1479,14 +1491,17 @@ class Screen:
         gcolor = FEATURE_COLORS.get(group.lower(), FEATURE_COLORS.get(fname.lower(), C_KEY2))
         pages = b.enc_pages()
         if self.enc_mode:
-            title = group if self.enc_tabs and group else fname
+            title = group if (self.enc_tabs or b.generic()) and group else fname
             more = "  v" if len(b.ma["groups"]) > 1 else ""  # tap for the other banks
             self.setw(self.ENC_FEAT, text=" " + title + more, colors=(shade(gcolor, 0.55), C_TEXT, C_PANEL))
             self.setw(self.ENC_PAGE, text=f"{b.enc_page + 1}/{pages}",
                       colors=(C_KEY2, C_TEXT if pages > 1 else C_DIM, C_BTN_ON))
         else:
-            hint = ("Select fixtures in MA" if b.ma_linked() and fname else
-                    "Encoders" if b.ma_linked() else "Encoders (no MA link)")
+            if b.generic():
+                hint = self.fmt(b.screen_opt("encoders_title"))
+            else:
+                hint = ("Select fixtures in MA" if b.ma_linked() and fname else
+                        "Encoders" if b.ma_linked() else "Encoders (no MA link)")
             self.setw(self.ENC_FEAT, text=" " + hint, colors=(C_PANEL, C_TEXT, C_PANEL))
             self.setw(self.ENC_PAGE, text="1/1", colors=(C_KEY2, C_DIM, C_BTN_ON))
         for i in range(2):
@@ -1503,7 +1518,8 @@ class Screen:
                 self.setw(base + 1, text=e["value"] or "-",  # like MA: red in the programmer, else grey
                           colors=(C_PANEL, C_PROG if e["prog"] else C_VALUE, C_PANEL))
                 res = res_label(e["res"])
-                self.keymap[base + 2] = {"resolution": e["attr"]}
+                # MA: Coarse/Fine/Ultra; generic: holds the target encoder's push (fine)
+                self.keymap[base + 2] = {"fine": e["n"]} if b.generic() else {"resolution": e["attr"]}
                 self.setw(base + 2, value=1 if res != "Coarse" else 0, text=res, colors=(C_BTN, C_TEXT, C_BTN_ON))
                 continue
             what, res = self.encoder_info(i)
@@ -1829,6 +1845,9 @@ class Screen:
         k = self.button_index(btn)
         btn = dict(btn, **(b.fader_act(btn) or {})) if "fader" in btn else btn
         name = b.fb["name"].get(btn.get("name")) if btn.get("name") else None
+        if name and btn.get("name_format"):  # e.g. "Speed 1\n{} BPM"
+            v = number(name)
+            name = str(btn["name_format"]).replace("{}", f"{v:g}" if v is not None else name)
         if not name and "exec" in btn and b.generic() and btn.get("show_name", True):
             name = b.exec_state(btn["exec"])[0]  # what's on the executor
         return b.fb["button_label"].get(k) or name or btn.get("label", "?")
@@ -1909,6 +1928,8 @@ class Screen:
     def keypad_text(self):
         if not self.cmdline and self.b.ma_linked():
             return (self.b.ma["busy"] or self.b.ma["cmdline"]) + "_"
+        if not self.cmdline and self.b.generic() and self.b.fb["cmdline"]:
+            return self.b.fb["cmdline"] + "_"
         return self.cmdline + "_"
 
     def update_cmdline(self):
@@ -2013,16 +2034,18 @@ class Screen:
                             f"key{self.name[4:]}" if self.name.startswith("exec") else "main")
         elif "encpage" in act:
             self.b.next_enc_page()
+        elif "fine" in act:
+            self.b.toggle_fine(act["fine"])
         elif "fgroups" in act:
             if self.b.ma["groups"]:
                 self.set_screen("fgroups")
         elif "fgroup" in act:
-            self.b.ma_plugin(f"group {act['fgroup']}")  # MA's report switches the encoders
+            self.b.enc_bank(act["fgroup"])  # the target's report switches the encoders
             self.b.enc_page = 0
             self.tab_paged = False
             self.set_screen("encoders")
         elif "tab" in act:
-            self.b.ma_plugin(f"tab {act['tab']}")  # MA's report switches the encoders
+            self.b.enc_tab(act["tab"])  # the target's report switches the encoders
             self.b.enc_page = 0
             self.tab_paged = False
         elif "tabpage" in act:
@@ -2043,7 +2066,7 @@ class Screen:
 
     def on_release(self, wid):
         act = self.keymap.get(wid)
-        if act and not any(k in act for k in ("keypad", "back", "encpage", "tab", "tabpage", "fgroups", "fgroup", "edit", "assign",
+        if act and not any(k in act for k in ("keypad", "back", "encpage", "fine", "tab", "tabpage", "fgroups", "fgroup", "edit", "assign",
                                               "digit", "reset_keys", "entry", "vkey", "setv", "setpage", "probe")):
             if not self.generic_button(act, 0):
                 self.b.do_action(act, False)
@@ -2142,6 +2165,8 @@ class Bridge:
         self.enc_edge_at = [0.0, 0.0]        # encoder click-size auto-detection
         self.enc_checked = [0.0, 0.0]
         self.enc_turned_at = [0.0, 0.0]          # generic "adjust" encoders: last turn
+        self.enc_fine = set()                    # generic: target encoders held fine (their push)
+        self.enc_bank_page, self.enc_bank_pages = 1, 1   # generic: the encoder bank's page
         self.enc_rest = [{}, {}]              # settled state -> times seen
         self.ma_values = {}                  # (page, exec) -> 0..100 from plain OSC feedback
         self.ma_seen = 0
@@ -2160,7 +2185,7 @@ class Bridge:
         self.fb = dict(fader={}, fader_name={}, fader_color={}, fader_running={}, button={}, button_label={},
                        lit={}, name={}, encoder_label={}, encoder_value={}, encoder_num={},
                        exec_fader={}, exec_run={}, exec_name={}, exec_color={},
-                       text=None, status=None, seen=0.0)
+                       text=None, status=None, cmdline="", cmd_error="", seen=0.0)
         self.ping_at = 0.0
         self.fb_rules = []
         self.hold = threading.Event()        # the app wants the port (set) ...
@@ -2234,6 +2259,9 @@ class Bridge:
             if isinstance(spec, dict):
                 lit += [b for b in spec.get("buttons") or [] if isinstance(b, dict)]
                 lit += [k for row in spec.get("keys") or [] for k in row if isinstance(k, dict)]
+        for entry in self.cfg.get("midi") or []:  # MIDI pads and buttons light from them too
+            for items in ((entry or {}).get("map") or {}).values() if isinstance(entry, dict) else []:
+                lit += [it for it in items or [] if isinstance(it, dict)]
         for btn in lit:
             if btn.get("lit"):
                 add(btn["lit"], "lit", btn["lit"])
@@ -2266,6 +2294,14 @@ class Bridge:
             scr = self.screen if self.pi_ready else None
             if kind.startswith("exec_") and n is not None:
                 self.on_exec_feedback(kind, n, val)
+                return True
+            if kind.startswith("enc_"):
+                self.on_enc_feedback(kind, n, val)
+                return True
+            if kind in ("cmdline", "cmd_error"):  # the target's command line as typed / its last error
+                self.fb[kind] = str(val if val is not None else "")
+                if scr:
+                    scr.update_cmdline()
                 return True
             if kind == "fader" and n and isinstance(val, (int, float)):
                 f = self.cfg["faders"][n - 1] if n - 1 < len(self.cfg["faders"]) else {}
@@ -2477,8 +2513,12 @@ class Bridge:
 
     # ---- following MA's encoders: hardware encoder i = MA encoder 2*page + i
     def ma_encoders_on(self):
-        return self.ma_linked() and self.ma["encn"] > 0 and any(
-            e and e.get("follow") for e in self.cfg["encoders"])
+        if self.generic():  # the target reports its encoders, and something is on them
+            linked = time.time() - self.ma_seen < 6
+            on = linked and any(e.get("attr") for e in self.ma["encs"].values())
+        else:
+            on = self.ma_linked() and self.ma["encn"] > 0
+        return on and any(e and e.get("follow") for e in self.cfg["encoders"])
 
     def enc_pages(self):
         return max(1, -(-self.ma["encn"] // 2))
@@ -2489,7 +2529,85 @@ class Bridge:
         if not (self.ma_encoders_on() and i < len(encs) and encs[i] and encs[i].get("follow")):
             return None
         k = self.enc_page * 2 + i + 1
-        return self.ma["encs"].get(k) if k <= self.ma["encn"] else None
+        e = self.ma["encs"].get(k) if k <= self.ma["encn"] else None
+        return e if e and e.get("attr") else None
+
+    def followed(self, i):
+        """The target's encoder number hardware encoder i is on (pairs: 1-2, 3-4...)."""
+        return self.enc_page * 2 + i + 1
+
+    def on_enc_feedback(self, kind, n, val):
+        """Generic feedback about the target's attribute encoders (bank, page, each
+        encoder's attribute / value), shown like MA's encoders."""
+        ma = self.ma
+        text = str(val if val is not None else "")
+        if kind in ("enc_name", "enc_value", "enc_level") and n:
+            e = ma["encs"].setdefault(n, dict(attr="", pretty="", value="", prog=False, res=1.0, n=n))
+            if kind == "enc_name":
+                e["attr"] = e["pretty"] = text
+            elif kind == "enc_value":
+                e["value"] = text
+            else:
+                e["level"] = number(val)
+            e["res"] = 0.1 if n in self.enc_fine else 1.0
+            ma["encn"] = max(ma["encn"], n, 2)
+        elif kind == "enc_feature":
+            if text != ma["feat"][1]:
+                self.enc_page = 0  # another bank: start at its first pair
+            ma["feat"] = (ma["feat"][0], text, True)
+            feats = [str(f) for f in self.cfg.get("encoder_features") or []]
+            ma["groups"] = feats or ([text] if text else [])
+        elif kind in ("enc_page", "enc_pages"):
+            v = number(val)
+            if v is None:
+                return
+            if kind == "enc_page":
+                self.enc_bank_page = int(v)
+            else:
+                self.enc_bank_pages = int(v)
+            pages = self.enc_bank_pages
+            ma["tabs"] = [f"Page {k}" for k in range(1, pages + 1)] if pages > 1 else []
+            ma["feat"] = (f"Page {self.enc_bank_page}", ma["feat"][1], True)
+            if self.pi_ready:
+                self.screen.tab_paged = False
+        if self.pi_ready:
+            if kind == "enc_feature" and self.screen.name == "fgroups":
+                self.screen.draw()
+            self.screen.update_encoders()
+
+    def enc_bank(self, name):
+        """Show another encoder bank (MA: feature group; generic: its enc_feature)."""
+        if not self.generic():
+            self.ma_plugin(f"group {name}")
+            return
+        addr = self.generic_addr("enc_feature")
+        if addr.startswith("/"):
+            self.osc(addr, str(name))
+
+    def enc_tab(self, tab):
+        """Show another tab of the bank (MA: a feature; generic: "Page n", stepped to)."""
+        if not self.generic():
+            self.ma_plugin(f"tab {tab}")
+            return
+        m = re.search(r"(\d+)$", str(tab))
+        if not m:
+            return
+        steps = int(m.group(1)) - self.enc_bank_page
+        addr = self.generic_addr("enc_next" if steps > 0 else "enc_prev")
+        if addr.startswith("/"):
+            for _ in range(abs(steps)):
+                self.osc(addr, 1)
+
+    def toggle_fine(self, n):
+        """Generic: hold (or let go of) the target encoder n's push: it turns fine."""
+        on = n not in self.enc_fine
+        self.enc_fine.add(n) if on else self.enc_fine.discard(n)
+        self.generic_send("push", n, self.onoff("push", on))
+        e = self.ma["encs"].get(n)
+        if e:
+            e["res"] = 0.1 if on else 1.0
+        if self.pi_ready:
+            self.screen.update_encoders()
 
     def following(self, i):
         """True when hardware encoder i follows MA (even onto an empty slot)."""
@@ -2512,6 +2630,8 @@ class Bridge:
 
     def enc_click(self, i):
         e = self.enc_cfg(i)
+        if self.generic() and self.following(i):  # the target's encoder: held = fine, like its desk
+            return e.get("follow_click", "push")
         if "click" in e:
             return e["click"]
         if self.generic():
@@ -2524,6 +2644,8 @@ class Bridge:
 
     def choices(self, i):
         """Names offered on encoder i's value page."""
+        if self.generic() and self.following(i):
+            return []
         src = self.enc_cfg(i).get("choices", None if self.generic() else "ma")
         if isinstance(src, list):
             return [str(c.get("label", c.get("value", "?"))) if isinstance(c, dict) else str(c) for c in src]
@@ -2554,6 +2676,13 @@ class Bridge:
             if a:
                 self.set_value(a[0], text)
             return
+        if self.following(i):  # the target's encoder: its command, e.g. "Position Pan At 90"
+            a = self.encoder_attr(i)
+            tpl = self.generic_addr("enc_set")
+            if a and tpl:
+                self.ma_cmd(tpl.replace("{feature}", self.ma["feat"][1]).replace("{attribute}", a[0])
+                            .replace("{value}", text).strip())
+            return
         try:
             v = float(text)
         except ValueError:
@@ -2573,6 +2702,9 @@ class Bridge:
 
     def encoder_attr(self, i):
         """-> (attribute, display name, MA's value text) encoder i controls, or None."""
+        if self.generic() and self.following(i):  # the target's encoder
+            e = self.ma_encoder(i)
+            return (e["attr"], e["pretty"], e["value"]) if e else None
         if self.generic():  # a value page of its own: label + feedback value
             if self.enc_click(i) != "pad":
                 return None
@@ -2600,6 +2732,9 @@ class Bridge:
                 self.screen.set_screen(f"entry{i}")
             return
         act = self.enc_cfg(i)
+        if self.generic() and self.following(i):  # the target encoder's push (held: fine)
+            self.generic_send("push", self.followed(i), self.onoff("push", down))
+            return
         if self.generic() and not has_action(act.get("push")):
             self.generic_send("push", i + 1, self.onoff("push", down))
             return
@@ -3027,6 +3162,9 @@ class Bridge:
                 d = -d
             if d and self.pi_ready and self.screen.scroll_sets(d):
                 pass  # scrolled the named values on the screen
+            elif d and self.generic() and self.following(i):  # the target's encoder: whole steps
+                if self.ma_encoder(i):
+                    self.generic_send("encoder", self.followed(i), int(d * act.get("follow_step", 1)))
             elif d and self.generic() and not any(k in act for k in self.ENC_TURNS):
                 self.generic_send("encoder", i + 1, self.as_number(d * self.values("encoder")))
             elif d and self.following(i):

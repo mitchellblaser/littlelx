@@ -362,9 +362,11 @@ class ButtonList(QWidget):
 
 class ConnectionPage(QWidget):
     GEN = ("fader", "key", "encoder", "push", "button", "page", "command", "set",
-           "exec", "exec_button", "exec_fader", "ping")
+           "exec", "exec_button", "exec_fader", "enc_feature", "enc_next", "enc_prev", "enc_set", "ping")
     GEN_LABELS = {"exec": "Executor button", "exec_button": "Executor's fader button ({b})",
-                  "exec_fader": "Executor fader", "ping": "Ping (every 2 s)"}
+                  "exec_fader": "Executor fader", "ping": "Ping (every 2 s)",
+                  "enc_feature": "Encoder bank (followed)", "enc_next": "Encoder page +",
+                  "enc_prev": "Encoder page -", "enc_set": "Typed value (command)"}
 
     def __init__(self):
         super().__init__()

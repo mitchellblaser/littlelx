@@ -19,7 +19,11 @@
       "exec": "/luna/exec/{n}",
       "exec_button": "/luna/fader/{n}/button/{b}",
       "exec_fader": "/luna/fader/{n}",
-      "ping": "/luna/ping"
+      "ping": "/luna/ping",
+      "enc_feature": "/luna/encoder/feature",
+      "enc_next": "/luna/encoder/page/next",
+      "enc_prev": "/luna/encoder/page/previous",
+      "enc_set": "{feature} {attribute} At {value}"
     },
     "values": {
       "fader": [
@@ -154,11 +158,13 @@
     },
     {
       "label": "Highlight",
-      "cmd": "Highlight"
+      "osc": "/luna/highlight",
+      "lit": "/luna/highlight"
     },
     {
       "label": "Blind",
-      "cmd": "Blind"
+      "osc": "/luna/blind",
+      "lit": "/luna/blind"
     },
     {
       "label": "Release",
@@ -207,14 +213,16 @@
           "label": "Out",
           "value": 0.0
         }
-      ]
+      ],
+      "follow": true
     },
     {
       "label": "Page",
       "page": 1,
       "push": {
         "screen": "keypad"
-      }
+      },
+      "follow": true
     }
   ],
   "touch_buttons": [
@@ -248,11 +256,13 @@
     },
     {
       "label": "Highlight",
-      "cmd": "Highlight"
+      "osc": "/luna/highlight",
+      "lit": "/luna/highlight"
     },
     {
       "label": "Blind",
-      "cmd": "Blind"
+      "osc": "/luna/blind",
+      "lit": "/luna/blind"
     },
     {
       "label": "Release",
@@ -270,7 +280,9 @@
     {
       "label": "Tap",
       "osc": "/luna/speedmaster/1/tap",
-      "color": "1f5a7a"
+      "color": "1f5a7a",
+      "name": "/luna/speedmaster/1/bpm",
+      "name_format": "Tap\n{} BPM"
     },
     {
       "label": "Masters",
@@ -295,7 +307,7 @@
     "middle": "cmdline",
     "status": "link",
     "link_name": "Luna",
-    "encoders": "simple",
+    "encoders": "follow",
     "encoders_title": "Encoders",
     "encoder_strip": true,
     "columns": null
@@ -311,7 +323,15 @@
       "/luna/fader/{n}/running",
       "/luna/exec/{n}"
     ],
-    "command": "/luna/cmd"
+    "enc_name": "/luna/encoder/{n}/name",
+    "enc_value": "/luna/encoder/{n}/value",
+    "enc_level": "/luna/encoder/{n}/level",
+    "enc_feature": "/luna/encoder/feature",
+    "enc_page": "/luna/encoder/page",
+    "enc_pages": "/luna/encoder/pages",
+    "cmdline": "/luna/cmdline",
+    "command": "/luna/cmdline/last",
+    "cmd_error": "/luna/cmdline/error"
   },
   "screens": {
     "masters": {
@@ -322,7 +342,9 @@
         {
           "label": "Speed 1 Tap",
           "osc": "/luna/speedmaster/1/tap",
-          "color": "1f5a7a"
+          "color": "1f5a7a",
+          "name": "/luna/speedmaster/1/bpm",
+          "name_format": "Speed 1 Tap\n{} BPM"
         },
         {
           "label": "Speed 1 /2",
@@ -335,7 +357,9 @@
         {
           "label": "Speed 2 Tap",
           "osc": "/luna/speedmaster/2/tap",
-          "color": "1f5a7a"
+          "color": "1f5a7a",
+          "name": "/luna/speedmaster/2/bpm",
+          "name_format": "Speed 2 Tap\n{} BPM"
         },
         {
           "label": "Speed 2 /2",
@@ -347,11 +371,15 @@
         },
         {
           "label": "Timing 1 Reset",
-          "osc": "/luna/timingmaster/1/reset"
+          "osc": "/luna/timingmaster/1/reset",
+          "name": "/luna/timingmaster/1/multiplier",
+          "name_format": "Timing 1 x{}\nReset"
         },
         {
           "label": "Timing 2 Reset",
-          "osc": "/luna/timingmaster/2/reset"
+          "osc": "/luna/timingmaster/2/reset",
+          "name": "/luna/timingmaster/2/multiplier",
+          "name_format": "Timing 2 x{}\nReset"
         },
         {
           "label": "Clear all",
@@ -687,10 +715,12 @@
             "cmd": "Go+"
           },
           {
-            "cmd": "Highlight"
+            "osc": "/luna/highlight",
+            "lit": "/luna/highlight"
           },
           {
-            "cmd": "Blind"
+            "osc": "/luna/blind",
+            "lit": "/luna/blind"
           },
           {
             "key": "Please"
@@ -952,10 +982,12 @@
             "cmd": "Go+"
           },
           {
-            "cmd": "Highlight"
+            "osc": "/luna/highlight",
+            "lit": "/luna/highlight"
           },
           {
-            "cmd": "Blind"
+            "osc": "/luna/blind",
+            "lit": "/luna/blind"
           },
           {
             "key": "Please"
@@ -1266,5 +1298,13 @@
         ]
       }
     }
+  ],
+  "encoder_features": [
+    "Intensity",
+    "Color",
+    "Position",
+    "Beam",
+    "Gobo",
+    "Control"
   ]
 }
