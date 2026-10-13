@@ -437,10 +437,10 @@ or `"number"` (`"decimals"`), plus a `"unit"`.
 
 `"follow": true` in a generic profile follows the target's attribute encoders, as
 with MA: while it reports some (`enc_name` feedback), turns go to its `encoder`
-address ({n} = its encoder, the hardware pair 1-2 / 3-4 picked with Enc. 1/2) in
-whole steps (`"follow_step"`), a click holds its `push` (`"follow_click"`), and the
-Encoders page shows the bank (tap: `encoder_features`), its pages, each value and
-a Fine button; tapping a value types one (`enc_set`). With nothing reported the
+address ({n} = its encoder) in whole steps (`"follow_step"`), a click holds its
+`push` (`"follow_click"`), and the Encoders page shows the bank (tap:
+`encoder_features`), one page button counting the target's pages two encoders at
+a time (its next page via `enc_next` / `enc_prev`), each value and a Fine button; tapping a value types one (`enc_set`). With nothing reported the
 encoder does what its own settings say. A button's `"name"` feedback can be
 shown with `"name_format"`, e.g. `"Tap\n{} BPM"`.
 
@@ -461,9 +461,9 @@ profile's `"color"`.
 | Faders 1–5 | Faders F1–F5 of Luna's current page (names, colours, levels, pickup, "> name" while running) |
 | Keys 1–5, 6–10, 11–15 | The buttons of the fader above them: button 1, 2, 3 (what each does is set in Luna, per sequence) |
 | Keys 16–20 | The button of that fader's strip (fader F1 -> button B1, ...) |
-| Encoders | Follow Luna's attribute encoders while fixtures are selected (pair 1–2 / 3–4, click = hold for fine; Encoders page: bank, its pages, values, resolution (Fine / Normal / Max), tap a value to type it or pick a gobo / colour slot by name) |
+| Encoders | Follow Luna's attribute encoders while fixtures are selected (pair 1–2 / 3–4, click = hold for fine; Encoders page: bank, one page button stepping through Luna's encoders two at a time (page 1 = 1–2, 2 = 3–4, 3 = its next page's 1–2...), values, resolution (Fine / Normal / Max), tap a value to type it or pick a gobo / colour slot by name) |
 | … nothing selected | Encoder 1: Grand Master (%; click: Full / 75 / 50 / 25 / Out or type a %); encoder 2: Page −/+, push = Keypad |
-| Touchscreen | Buttons B6–B10 (their names and colours, lit while running), Page −/+, Highlight and Blind (lit while on), Release, Clear all, Clear, Tap (Speed Master 1, with its BPM); Masters (Speed Masters with BPM, Timing Masters with their ×), Macros and a Luna keypad |
+| Touchscreen | Page −/+, Keypad, Highlight and Blind (lit while on), Clear, Tap (Speed Master 1, with its BPM), Encoders, More. More: buttons B6–B10 (their names and colours, lit while running), Release, Clear all, Masters (Speed Masters with BPM, Timing Masters with their ×) and Macros |
 | MIDI | APC Mini / mk2: faders 1–8 + Grand Master, pads = buttons B1–B8, fader buttons, macros; Midi Fighter Spectra: 4 faders' buttons + their B buttons per bank |
 
 The keys follow the faders: set fader 1 to `{"exec": 7}` and its keys work fader F7's

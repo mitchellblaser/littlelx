@@ -230,32 +230,16 @@
   ],
   "touch_buttons": [
     {
-      "label": "B6",
-      "exec": 106
-    },
-    {
-      "label": "B7",
-      "exec": 107
-    },
-    {
-      "label": "B8",
-      "exec": 108
-    },
-    {
-      "label": "B9",
-      "exec": 109
-    },
-    {
-      "label": "B10",
-      "exec": 110
-    },
-    {
       "label": "Page -",
       "page": -1
     },
     {
       "label": "Page +",
       "page": 1
+    },
+    {
+      "label": "Keypad",
+      "screen": "keypad"
     },
     {
       "label": "Highlight",
@@ -266,15 +250,6 @@
       "label": "Blind",
       "osc": "/luna/blind",
       "lit": "/luna/blind"
-    },
-    {
-      "label": "Release",
-      "cmd": "Release"
-    },
-    {
-      "label": "Clear all",
-      "cmd": "ClearAll",
-      "color": "5a2a2a"
     },
     {
       "label": "Clear",
@@ -288,20 +263,12 @@
       "name_format": "Tap\n{} BPM"
     },
     {
-      "label": "Masters",
-      "screen": "masters"
-    },
-    {
-      "label": "Macros",
-      "screen": "macros"
-    },
-    {
-      "label": "Keypad",
-      "screen": "keypad"
-    },
-    {
       "label": "Encoders",
       "screen": "encoders"
+    },
+    {
+      "label": "More",
+      "screen": "more"
     }
   ],
   "pickup": true,
@@ -344,10 +311,54 @@
     "enc_slot": "/luna/encoder/{n}/slot"
   },
   "screens": {
+    "more": {
+      "title": "More",
+      "columns": 3,
+      "back": "main",
+      "buttons": [
+        {
+          "label": "B6",
+          "exec": 106
+        },
+        {
+          "label": "B7",
+          "exec": 107
+        },
+        {
+          "label": "B8",
+          "exec": 108
+        },
+        {
+          "label": "B9",
+          "exec": 109
+        },
+        {
+          "label": "B10",
+          "exec": 110
+        },
+        {
+          "label": "Release",
+          "cmd": "Release"
+        },
+        {
+          "label": "Clear all",
+          "cmd": "ClearAll",
+          "color": "5a2a2a"
+        },
+        {
+          "label": "Masters",
+          "screen": "masters"
+        },
+        {
+          "label": "Macros",
+          "screen": "macros"
+        }
+      ]
+    },
     "masters": {
       "title": "Masters",
       "columns": 3,
-      "back": "main",
+      "back": "more",
       "buttons": [
         {
           "label": "Speed 1 Tap",
@@ -400,8 +411,8 @@
     },
     "macros": {
       "title": "Macros",
-      "columns": 4,
-      "back": "main",
+      "columns": 3,
+      "back": "more",
       "buttons": [
         {
           "label": "Macro 1",
@@ -440,18 +451,6 @@
           "osc": "/luna/macro/9"
         },
         {
-          "label": "Macro 10",
-          "osc": "/luna/macro/10"
-        },
-        {
-          "label": "Macro 11",
-          "osc": "/luna/macro/11"
-        },
-        {
-          "label": "Macro 12",
-          "osc": "/luna/macro/12"
-        },
-        {
           "label": "Stop 1",
           "osc": "/luna/macro/1/stop",
           "color": "5a2a2a"
@@ -464,11 +463,6 @@
         {
           "label": "Stop 3",
           "osc": "/luna/macro/3/stop",
-          "color": "5a2a2a"
-        },
-        {
-          "label": "Stop 4",
-          "osc": "/luna/macro/4/stop",
           "color": "5a2a2a"
         }
       ]
