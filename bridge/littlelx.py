@@ -1390,7 +1390,7 @@ class Screen:
         self.widget(self.ENC_PAGE, "B", w - 92, top, 88, 40, C_KEY2, C_TEXT, C_BTN_ON, 1, 0, 0, "")
         top += 46
         # the feature group's tabs (Gobo2, Gobo2Pos, ...), like MA's encoder bar
-        self.enc_tabs = self.enc_mode and len(b.ma["tabs"]) > 1
+        self.enc_tabs = self.wants_tabs()
         if self.enc_tabs:
             tw = (w - 4) // self.TABS_SHOWN
             for n in range(self.TABS_SHOWN):
@@ -1412,6 +1412,12 @@ class Screen:
             self.widget(base + 2, "B", 8, by, w - 16, bh, C_BTN, C_TEXT, C_BTN_ON, 1, 0, 0, "")
         self.back_button()
         self.update_encoders()
+
+    def wants_tabs(self):
+        """MA: a row of the feature group's features. (A generic target's pages
+        are counted on the page button with the pairs instead.)"""
+        b = self.b
+        return self.enc_mode and not b.generic() and len(b.ma["tabs"]) > 1
 
     def draw_fgroups(self):
         """The encoder banks (MA's feature groups) the selected fixture has:
@@ -1484,7 +1490,7 @@ class Screen:
                 self.setw(base + 2, value=0, text="", colors=(C_PANEL, C_PANEL, C_PANEL))
             return
         if (b.ma_encoders_on() != self.enc_mode or  # MA started/stopped giving encoders: new layout
-                (b.ma_encoders_on() and (len(b.ma["tabs"]) > 1) != self.enc_tabs)):
+                (b.ma_encoders_on() and self.wants_tabs() != self.enc_tabs)):
             self.draw_encoders()
             return
         if self.enc_tabs:
@@ -1493,11 +1499,14 @@ class Screen:
         fname, group, has_sel = ma["feat"]
         gcolor = FEATURE_COLORS.get(group.lower(), FEATURE_COLORS.get(fname.lower(), C_KEY2))
         pages = b.enc_pages()
+        cur = b.enc_page
+        if b.generic():  # the target's pages and the pairs on them, as one count
+            cur, pages = b.enc_flat()
         if self.enc_mode:
             title = group if (self.enc_tabs or b.generic()) and group else fname
             more = "  v" if len(b.ma["groups"]) > 1 else ""  # tap for the other banks
             self.setw(self.ENC_FEAT, text=" " + title + more, colors=(shade(gcolor, 0.55), C_TEXT, C_PANEL))
-            self.setw(self.ENC_PAGE, text=f"{b.enc_page + 1}/{pages}",
+            self.setw(self.ENC_PAGE, text=f"{cur + 1}/{pages}",
                       colors=(C_KEY2, C_TEXT if pages > 1 else C_DIM, C_BTN_ON))
         else:
             if b.generic():
@@ -2666,7 +2675,32 @@ class Bridge:
         encs = self.cfg["encoders"]
         return self.ma_encoders_on() and i < len(encs) and bool(encs[i] and encs[i].get("follow"))
 
+    def enc_flat(self):
+        """Generic: (page, pages) counted in pairs of encoders across the target's
+        own pages - its page 1 = 1-2, encoders 3-4 = 2, its page 2 = 3..."""
+        pages = max(1, self.enc_bank_pages)
+        total = pages * 2
+        last_half_empty = not any((self.ma["encs"].get(k) or {}).get("attr") for k in (3, 4))
+        if self.enc_bank_page >= pages and last_half_empty:
+            total -= 1  # only encoders 1-2 on its last page
+        cur = (max(1, self.enc_bank_page) - 1) * 2 + self.enc_page
+        return min(cur, total - 1), total
+
     def next_enc_page(self):
+        if self.generic() and self.ma_encoders_on():  # next pair, then the target's next page
+            cur, total = self.enc_flat()
+            new = (cur + 1) % total
+            steps = new // 2 + 1 - self.enc_bank_page
+            addr = self.generic_addr("enc_next" if steps > 0 else "enc_prev")
+            if addr.startswith("/"):
+                for _ in range(abs(steps)):
+                    self.osc(addr, 1)
+            self.enc_page = new % 2
+            if steps:  # until the target reports it
+                self.enc_bank_page += steps
+            if self.pi_ready:
+                self.screen.update_encoders()
+            return
         self.enc_page = (self.enc_page + 1) % self.enc_pages()
         if self.pi_ready:
             self.screen.update_encoders()
