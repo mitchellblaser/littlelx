@@ -405,7 +405,9 @@ adds to it.
 
 Actions (keys, touchscreen buttons, keypad keys, encoder pushes, MIDI pads): `{"exec": 201}`
 (executor button; generic: to the `exec` address, or with `"button": 2` to that
-fader's button at `exec_button`), `{"key": "Store"}` (command-line key), `{"cmd": "Go+"}`
+fader's button at `exec_button`), `{"fader": 2, "button": 1}` (a button of whatever
+executor controller fader 2 is set to; `"offset": 100` = its strip's button executor,
+e.g. fader on 3 -> executor 103), `{"key": "Store"}` (command-line key), `{"cmd": "Go+"}`
 (command right away; generic: to the command address), `{"page": 1}`,
 `{"screen": "keypad"}` (any screen, also your own), `{"resolution": "Dimmer"}`,
 `{"cmdline": "please" | "clear" | "backspace"}` (keypad special keys),
@@ -441,12 +443,16 @@ profile's `"color"`.
 | Control | Does |
 |---------|------|
 | Faders 1–5 | Faders 1–5 of Luna's current page (names, levels, pickup, "> name" while running) |
-| Keys 1–5 | Page − / Page + / Go− / Go+ / button executor 101 |
-| Keys 6–10, 11–15, 16–20 | Each fader's buttons: above-left (Back), above-right (Stop), below (Go) |
+| Keys 1–5, 6–10, 11–15 | The buttons of the fader above them: button 1, 2, 3 (what each does is set in Luna, per sequence) |
+| Keys 16–20 | The button executor of that fader's strip (fader 1 -> 101, ...) |
 | Encoder 1 | Grand Master (shown in %); click: Full / 75 / 50 / 25 / Out or type a % |
 | Encoder 2 | Page −/+; push = Keypad screen |
-| Touchscreen | Button executors 104–109 (their names, lit while running), Highlight, Blind, Release, Clear all, Clear, Tap (Speed Master 1); Masters (Speed / Timing Masters), Macros and a Luna keypad |
+| Touchscreen | Button executors 106–110 (their names, lit while running), Page −/+, Highlight, Blind, Release, Clear all, Clear, Tap (Speed Master 1); Masters (Speed / Timing Masters), Macros and a Luna keypad |
 | MIDI | APC Mini / mk2: faders 1–8 + Grand Master, pads = executors 101–108, fader buttons, macros; Midi Fighter Spectra: 4 faders' buttons + executor per bank |
+
+The keys follow the faders: set fader 1 to `{"exec": 7}` and its keys work fader 7's
+buttons and executor 107. In Setup, a key's choices start with the buttons of the
+fader in its column.
 
 The top bar shows the page, the last command line (yours, and with Luna's
 **Echo commands** on, the console's too) and **Luna linked** while Luna answers.

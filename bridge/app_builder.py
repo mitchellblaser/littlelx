@@ -60,6 +60,10 @@ def describe(act):
         return "-"
     if "exec" in act and act.get("button"):
         return f"Exec {act['exec']}.{act['button']}"
+    if "fader" in act:
+        if act.get("button"):
+            return f"Fader {act['fader']} button {act['button']}"
+        return f"Fader {act['fader']} exec {act['offset']:+d}" if act.get("offset") else f"Fader {act['fader']} key"
     for k, f in (("exec", "Exec {}"), ("osc", "OSC {}"), ("cmd", "Cmd {}"), ("key", "Key {}"),
                  ("screen", "Screen {}"), ("cmdline", "Keypad {}"), ("resolution", "Coarse/Fine {}")):
         if k in act:
@@ -115,7 +119,7 @@ class ColorEdit(QWidget):
 # ---------------------------------------------------------------- actions
 
 ACTION_TYPES = [
-    ("Executor button", "exec"), ("Command-line key", "key"), ("Command", "cmd"), ("OSC message", "osc"),
+    ("Executor button", "exec"), ("Controller fader's button", "fader"), ("Command-line key", "key"), ("Command", "cmd"), ("OSC message", "osc"),
     ("Page - / Page +", "page"), ("Go to page", "goto_page"), ("Open a screen", "screen"), ("Keypad special key", "cmdline"),
     ("MA Coarse/Fine", "resolution"), ("Encoder pair 1/2", "encpage"), ("Nothing", None),
 ]
@@ -159,6 +163,20 @@ class ActionDialog(QDialog):
         self.exec_btn.setSpecialValueText("its own button")
         self.exec_btn.setValue(int(act.get("button") or 0))
         page("exec", [("Executor", self.exec_no), ("Fader button (generic)", self.exec_btn)])
+        self.fader_no = QSpinBox()
+        self.fader_no.setRange(1, 5)
+        self.fader_no.setValue(int(act.get("fader", 1)))
+        self.fader_btn = QSpinBox()
+        self.fader_btn.setRange(0, 9)
+        self.fader_btn.setSpecialValueText("its key")
+        self.fader_btn.setValue(int(act.get("button") or 0) if "fader" in act else 1)
+        self.fader_off = QSpinBox()
+        self.fader_off.setRange(-999, 999)
+        self.fader_off.setValue(int(act.get("offset") or 0))
+        page("fader", [("Fader", self.fader_no), ("Button", self.fader_btn),
+                       ("Executor + (strip)", self.fader_off),
+                       ("", QLabel("Follows whatever executor that fader is set to;\n"
+                                   "e.g. + 100: its strip's button executor (Luna 101-)"))])
         self.key = QComboBox()
         self.key.setEditable(True)
         self.key.addItems(CMD_KEYS)
@@ -233,6 +251,12 @@ class ActionDialog(QDialog):
             a["exec"] = self.exec_no.value()
             if self.exec_btn.value():
                 a["button"] = self.exec_btn.value()
+        elif t == "fader":
+            a["fader"] = self.fader_no.value()
+            if self.fader_off.value():
+                a["offset"] = self.fader_off.value()
+            if self.fader_btn.value():
+                a["button"] = self.fader_btn.value()
         elif t == "key":
             a["key"] = self.key.currentText().strip()
         elif t == "cmd":

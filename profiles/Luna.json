@@ -63,79 +63,84 @@
   ],
   "keys": [
     {
-      "page": -1
-    },
-    {
-      "page": 1
-    },
-    {
-      "cmd": "Go-"
-    },
-    {
-      "cmd": "Go+"
-    },
-    {
-      "exec": 101
-    },
-    {
-      "exec": 1,
+      "fader": 1,
       "button": 1
     },
     {
-      "exec": 2,
+      "fader": 2,
       "button": 1
     },
     {
-      "exec": 3,
+      "fader": 3,
       "button": 1
     },
     {
-      "exec": 4,
+      "fader": 4,
       "button": 1
     },
     {
-      "exec": 5,
+      "fader": 5,
       "button": 1
     },
     {
-      "exec": 1,
+      "fader": 1,
       "button": 2
     },
     {
-      "exec": 2,
+      "fader": 2,
       "button": 2
     },
     {
-      "exec": 3,
+      "fader": 3,
       "button": 2
     },
     {
-      "exec": 4,
+      "fader": 4,
       "button": 2
     },
     {
-      "exec": 5,
+      "fader": 5,
       "button": 2
     },
     {
-      "exec": 1,
+      "fader": 1,
       "button": 3
     },
     {
-      "exec": 2,
+      "fader": 2,
       "button": 3
     },
     {
-      "exec": 3,
+      "fader": 3,
       "button": 3
     },
     {
-      "exec": 4,
+      "fader": 4,
       "button": 3
     },
     {
-      "exec": 5,
+      "fader": 5,
       "button": 3
+    },
+    {
+      "fader": 1,
+      "offset": 100
+    },
+    {
+      "fader": 2,
+      "offset": 100
+    },
+    {
+      "fader": 3,
+      "offset": 100
+    },
+    {
+      "fader": 4,
+      "offset": 100
+    },
+    {
+      "fader": 5,
+      "offset": 100
     }
   ],
   "key_choices": [
@@ -214,14 +219,6 @@
   ],
   "touch_buttons": [
     {
-      "label": "Exec 104",
-      "exec": 104
-    },
-    {
-      "label": "Exec 105",
-      "exec": 105
-    },
-    {
       "label": "Exec 106",
       "exec": 106
     },
@@ -236,6 +233,18 @@
     {
       "label": "Exec 109",
       "exec": 109
+    },
+    {
+      "label": "Exec 110",
+      "exec": 110
+    },
+    {
+      "label": "Page -",
+      "page": -1
+    },
+    {
+      "label": "Page +",
+      "page": 1
     },
     {
       "label": "Highlight",

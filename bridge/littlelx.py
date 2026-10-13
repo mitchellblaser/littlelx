@@ -924,7 +924,8 @@ def bgr_line(line):
 
 # Keys of an action that does something of its own (else, in a generic
 # profile, a key / touch button sends the profile's default address)
-ACTION_KEYS = ("osc", "exec", "cmd", "key", "page", "goto_page", "screen", "encpage", "cmdline", "resolution")
+ACTION_KEYS = ("osc", "exec", "fader", "cmd", "key", "page", "goto_page", "screen", "encpage", "cmdline",
+               "resolution")
 
 
 def has_action(act):
@@ -1674,8 +1675,13 @@ class Screen:
                             {k: v for k, v in c.items() if k != "label"}))
         return out
 
-    def key_choices(self):
+    def key_choices(self, i=None):
         base = (self.GENERIC_KEY_CHOICES if self.b.generic() else self.KEY_CHOICES) + self.profile_key_choices()
+        if i is not None:  # the buttons of the fader in this key's column (whatever it is on)
+            c = i % 5 + 1
+            base = ([(f"F{c} btn {b}", {"fader": c, "button": b}) for b in (1, 2, 3)]
+                    + [(f"F{c} exec", {"fader": c, "offset": 100})] if self.b.generic()
+                    else [(f"F{c} key", {"fader": c})]) + base
         own = [(str(spec.get("title") or name)[:12], {"screen": name})
                for name, spec in (self.b.cfg.get("screens") or {}).items()
                if isinstance(spec, dict) and name not in ("main", "keypad", "encoders")]  # those are listed
@@ -1700,6 +1706,11 @@ class Screen:
     def describe(cls, act):
         if not act:
             return "-"
+        if "fader" in act:
+            if act.get("button"):
+                return f"F{act['fader']} btn {act['button']}"
+            off = act.get("offset")
+            return f"F{act['fader']} exec" if off == 100 else f"F{act['fader']} {off:+d}" if off else f"F{act['fader']} key"
         if "exec" in act and act.get("button"):
             return f"Exec {act['exec']}.{act['button']}"
         if "exec" in act:
@@ -1775,7 +1786,7 @@ class Screen:
         top = self.header_h() + 4
         self.keymap = {}
         self.setup_title(top, f"Key {i + 1}: {self.key_label(i)}\nchoose what it does")
-        choices = self.key_choices()
+        choices = self.key_choices(i)
         cols = 4 if self.portrait else 5
         rows = -(-len(choices) // cols)
         gy = top + 44
@@ -1816,12 +1827,15 @@ class Screen:
     def button_label(self, btn):
         b = self.b
         k = self.button_index(btn)
+        btn = dict(btn, **(b.fader_act(btn) or {})) if "fader" in btn else btn
         name = b.fb["name"].get(btn.get("name")) if btn.get("name") else None
         if not name and "exec" in btn and b.generic() and btn.get("show_name", True):
             name = b.exec_state(btn["exec"])[0]  # what's on the executor
         return b.fb["button_label"].get(k) or name or btn.get("label", "?")
 
     def button_lit(self, btn):
+        if "fader" in btn:
+            btn = dict(btn, **(self.b.fader_act(btn) or {}))
         if btn.get("lit") in self.b.fb["lit"]:  # its own feedback address
             return 1 if self.b.fb["lit"][btn["lit"]] else 0
         k = self.button_index(btn)
@@ -2299,6 +2313,25 @@ class Bridge:
                 self.set_page(int(val), from_ma=True)
             return True
         return False
+
+    def fader_act(self, act):
+        """{"fader": n, "button": b} -> the same on the executor controller fader
+        n is assigned to ({"exec": .., "button": b}), or None if it has none.
+        "offset": another executor of its strip, e.g. 100: fader 3 -> exec 103."""
+        if not isinstance(act, dict) or "fader" not in act:
+            return act
+        try:
+            f = self.cfg["faders"][int(act["fader"]) - 1]
+        except (ValueError, TypeError, IndexError):
+            return None
+        if not f or f.get("exec") is None:
+            return None
+        out = {k: v for k, v in act.items() if k not in ("fader", "offset")}
+        try:
+            out["exec"] = f["exec"] + int(act.get("offset") or 0)
+        except (ValueError, TypeError):
+            return None
+        return out
 
     def default_keys(self):
         """The keys as they come: the shipped example of the active profile, else
@@ -2804,6 +2837,11 @@ class Bridge:
             print(f"OSC send failed: {e}")
 
     def do_action(self, act, down):
+        if "fader" in act:  # a controller fader's button: whatever that fader is on
+            act = self.fader_act(act)
+            if act:
+                self.do_action(act, down)
+            return
         if "cmdline" in act:  # keypad specials: {"cmdline": "please" | "clear" | "backspace"}
             if down and act["cmdline"] in Screen.CMDLINE_KEYS:
                 self.ma_key(Screen.CMDLINE_KEYS[act["cmdline"]])
@@ -2863,6 +2901,8 @@ class Bridge:
     def item_state(self, act):
         """For lights (MIDI devices): -> ("off" | "idle" | "on", sequence colour or None).
         idle = something is assigned; on = it runs / is active."""
+        if act and "fader" in act:
+            act = self.fader_act(act)
         if not act:
             return "off", None
         ma = self.ma
