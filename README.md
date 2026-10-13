@@ -293,8 +293,9 @@ A **profile** describes the whole controller: where it talks to (grandMA3, or
 plain OSC to anything else), what each fader, key and encoder does, the
 touchscreen's main buttons and its keypad. Profiles are plain files in the
 `littlelx-profiles` folder in your home folder - edit them in any text editor,
-copy them, share them. Two examples are put there (when missing):
-`grandMA3.json` (the default layout) and `Generic OSC.json`.
+copy them, share them. The examples are put there (when missing):
+`grandMA3.json` (the default layout), `Generic OSC.json` and `Luna.json`
+(see [Luna](#luna) below).
 
 The **active** profile is also stored on the controller (next to the learned
 wiring), so it travels with it: plug it into another computer and it brings
@@ -328,7 +329,13 @@ on the controller.
       "button": "/button/{n}",  //   touchscreen buttons
       "page": "/page",          //   page number (Page -/+)
       "command": "/command",    //   the keypad's command line, on Please
-      "set": "/encoder/{n}/set" //   a value set on an encoder's value page
+      "set": "/encoder/{n}/set",//   a value set on an encoder's value page
+      "exec": "/exec/{n}",      //   {"exec": n} actions (pressed / released)
+      "exec_button": "/exec/{n}/button/{b}",  // {"exec": n, "button": b}: a fader's button
+      "exec_fader": "/exec/{n}/fader",        // faders with {"exec": n}
+      "enc_feature": "", "enc_next": "", "enc_prev": "",  // "follow" encoders: bank, its pages
+      "enc_set": "{feature} {attribute} At {value}",       //   a typed value, as a command
+      "ping": ""                //   sent every 2 s, keeps "linked" fresh ("" = none)
     }
   },
   "faders": [{"exec": 201, "name": "Front", "color": "e0a020"},
@@ -360,8 +367,10 @@ on the controller.
     "middle": "cmdline",        //   "cmdline" (MA), "sent" (last OSC sent),
                                 //   "feedback" (from the "text" address) or text
     "status": "ma",             //   "ma" (MA3 linked), "osc" (where to; green while
-                                //   OSC comes back), "feedback" or text
-    "encoders": "ma",           //   "ma" (follow MA's encoders) or "simple"
+                                //   OSC comes back), "link" ("<link_name> linked"
+                                //   while OSC comes back), "feedback" or text
+    "link_name": "Luna",
+    "encoders": "ma",           //   "ma" / "follow" (follow MA's or the target's encoders) or "simple"
     "encoders_title": "Encoders",
     "encoder_strip": true,      //   the small encoder line on main / keypad
     "columns": null,            //   main page button grid (null: fits the number of buttons)
@@ -377,8 +386,19 @@ on the controller.
     "button": "/button/{n}/state",   //   lit when > 0 / "on"
     "button_label": "/button/{n}/label",
     "encoder_label": "/encoder/{n}/label", "encoder_value": "/encoder/{n}/value",
-    "text": "/text", "status": "/status", "page": "/page"
-  }
+    "text": "/text", "status": "/status", "page": "/page",
+    "fader_running": "/fader/{n}/running",   // "> name" on the fader while it runs
+    "command": "/cmd/echo",     //   a command line run on the target (top bar "cmdline")
+    "exec_fader": "/exec/{n}/fader",          // executors ({n} as in {"exec": n}):
+    "exec_run": "/exec/{n}/running",          //   level, running (lights, "> name"),
+    "exec_name": ["/exec/{n}/name", "/fader/{n}/name"],   // name, colour - any
+    "exec_color": "/exec/{n}/color",          //   address can also be a list
+    "cmdline": "/cmdline", "cmd_error": "/cmdline/error",  // the line as typed; why the last failed
+    "enc_name": "/enc/{n}/name", "enc_value": "/enc/{n}/value",   // the target's attribute
+    "enc_feature": "/enc/feature", "enc_page": "/enc/page", "enc_pages": "/enc/pages"  // encoders
+  },
+  "encoder_features": ["Intensity", "Color", ...],   // generic "follow": the banks to pick from
+  "key_choices": [{"label": "Go+", "cmd": "Go+"}, ...]   // extra choices in Setup's key editor
 }
 ```
 
@@ -389,8 +409,11 @@ encoders), and a generic profile without `"feedback"` listens on the addresses
 above. With grandMA3 the plugin reports MA's state; a `"feedback"` section there
 adds to it.
 
-Actions (keys, touchscreen buttons, keypad keys, encoder pushes): `{"exec": 201}`
-(executor button), `{"key": "Store"}` (command-line key), `{"cmd": "Go+"}`
+Actions (keys, touchscreen buttons, keypad keys, encoder pushes, MIDI pads): `{"exec": 201}`
+(executor button; generic: to the `exec` address, or with `"button": 2` to that
+fader's button at `exec_button`), `{"fader": 2, "button": 1}` (a button of whatever
+executor controller fader 2 is set to; `"offset": 100` = its strip's button executor,
+e.g. fader on 3 -> executor 103), `{"key": "Store"}` (command-line key), `{"cmd": "Go+"}`
 (command right away; generic: to the command address), `{"page": 1}`,
 `{"screen": "keypad"}` (any screen, also your own), `{"resolution": "Dimmer"}`,
 `{"cmdline": "please" | "clear" | "backspace"}` (keypad special keys),
@@ -399,15 +422,61 @@ Actions (keys, touchscreen buttons, keypad keys, encoder pushes): `{"exec": 201}
 `"on"` / `"off"` - with any connection). Keypad keys that are plain text are
 typed into the command line.
 
-Encoder clicks: `"click"` is `"pad"` (a value page: number pad if `"pad"`, and
-`"choices"`: `"ma"` = MA's named values of the attribute, or your own list),
-`"push"` (its push action / push address) or `"none"`. Generic profiles send
-the value to the encoder's `"set"` address. The main page's buttons arrange
-themselves in a grid that suits how many there are (up to 18). A fader with `"osc"` sends its level 0..1
-there. In a `generic` profile, keys and buttons without their own `"osc"` send
-to the `generic` addresses (Page and screen buttons still work locally).
+Encoder turns: `"attribute"` (MA), `"page": 1` (Page -/+), `"cmd": "... {d} ..."`
+(a command, `{d}` = the step), `"osc": "/addr"` (sends +step / -step) or
+`"adjust": "/addr"` (an absolute value: moved `"step"` per click from the one its
+`"value"` address reports, within its `"range"`, default 0..1). A generic encoder
+with none of these sends clicks to its `encoder` address. Encoder clicks:
+`"click"` is `"pad"` (a value page: number pad if `"pad"`, and `"choices"`:
+`"ma"` = MA's named values of the attribute, or your own list), `"push"` (its
+`"push"` action, else the push address) or `"none"`. Generic profiles send the
+value to the encoder's `"set"` (or `"adjust"`) address. Values are shown with
+`"format"`: `"percent"` (of the `"range"`; a number typed on the pad is in % too)
+or `"number"` (`"decimals"`), plus a `"unit"`.
+
+`"follow": true` in a generic profile follows the target's attribute encoders, as
+with MA: while it reports some (`enc_name` feedback), turns go to its `encoder`
+address ({n} = its encoder, the hardware pair 1-2 / 3-4 picked with Enc. 1/2) in
+whole steps (`"follow_step"`), a click holds its `push` (`"follow_click"`), and the
+Encoders page shows the bank (tap: `encoder_features`), its pages, each value and
+a Fine button; tapping a value types one (`enc_set`). With nothing reported the
+encoder does what its own settings say. A button's `"name"` feedback can be
+shown with `"name_format"`, e.g. `"Tap\n{} BPM"`.
+
+The main page's buttons arrange themselves in a grid that suits how many there
+are (up to 18); `"name": "/addr"` shows a label the target sends, and a button
+with `{"exec": n}` in a generic profile shows the executor's name and lights while
+it runs. A fader with `"osc"` sends its level 0..1 there. In a `generic` profile,
+keys and buttons without an action of their own send to the `generic` addresses.
 Colours: fader colours come from feedback, then MA's sequence colour, then the
 profile's `"color"`.
+
+### Luna
+
+`Luna.json` uses Luna's built-in OSC (`/luna/...`, nothing to map in Luna):
+
+| Control | Does |
+|---------|------|
+| Faders 1–5 | Faders 1–5 of Luna's current page (names, levels, pickup, "> name" while running) |
+| Keys 1–5, 6–10, 11–15 | The buttons of the fader above them: button 1, 2, 3 (what each does is set in Luna, per sequence) |
+| Keys 16–20 | The button executor of that fader's strip (fader 1 -> 101, ...) |
+| Encoders | Follow Luna's attribute encoders while fixtures are selected (pair 1–2 / 3–4, click = hold for fine; Encoders page: bank, its pages, values, Fine, tap a value to type it) |
+| … nothing selected | Encoder 1: Grand Master (%; click: Full / 75 / 50 / 25 / Out or type a %); encoder 2: Page −/+, push = Keypad |
+| Touchscreen | Button executors 106–110 (their names, lit while running), Page −/+, Highlight and Blind (lit while on), Release, Clear all, Clear, Tap (Speed Master 1, with its BPM); Masters (Speed Masters with BPM, Timing Masters with their ×), Macros and a Luna keypad |
+| MIDI | APC Mini / mk2: faders 1–8 + Grand Master, pads = executors 101–108, fader buttons, macros; Midi Fighter Spectra: 4 faders' buttons + executor per bank |
+
+The keys follow the faders: set fader 1 to `{"exec": 7}` and its keys work fader 7's
+buttons and executor 107. In Setup, a key's choices start with the buttons of the
+fader in its column.
+
+The top bar shows the page, Luna's command line as it's typed at the desk (then
+the last one run, and why it failed if it did) and **Luna linked** while Luna answers.
+
+In Luna (**Setup → Inputs → OSC**): turn on the **Listener** (port 8000) and
+**Feedback**, and add a destination: this computer's IP, port **9000**, with
+**Feedback** ticked. "Reply to senders" isn't enough: replies go
+to the port the bridge sends from, not the one it listens on. If Luna runs on
+another computer, put its IP in the profile's `host`.
 
 ## MIDI controllers
 

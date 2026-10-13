@@ -1,0 +1,1310 @@
+{
+  "name": "Luna",
+  "connection": {
+    "type": "generic",
+    "host": "127.0.0.1",
+    "port": 8000,
+    "prefix": "",
+    "listen_port": 9000,
+    "fader_type": "i",
+    "generic": {
+      "fader": "/luna/fader/{n}",
+      "key": "/luna/key/{n}",
+      "encoder": "/luna/encoder/{n}",
+      "push": "/luna/encoder/{n}/push",
+      "button": "/luna/button/{n}",
+      "page": "/luna/page/{n}",
+      "command": "/luna/cmd",
+      "set": "/luna/encoder/{n}/set",
+      "exec": "/luna/exec/{n}",
+      "exec_button": "/luna/fader/{n}/button/{b}",
+      "exec_fader": "/luna/fader/{n}",
+      "ping": "/luna/ping",
+      "enc_feature": "/luna/encoder/feature",
+      "enc_next": "/luna/encoder/page/next",
+      "enc_prev": "/luna/encoder/page/previous",
+      "enc_set": "{feature} {attribute} At {value}"
+    },
+    "values": {
+      "fader": [
+        0.0,
+        1.0
+      ],
+      "key": [
+        1,
+        0
+      ],
+      "button": [
+        1,
+        0
+      ],
+      "push": [
+        1,
+        0
+      ],
+      "encoder": 1,
+      "integer": false
+    },
+    "fader_interval": 0.025,
+    "fader_jump": 5
+  },
+  "faders": [
+    {
+      "exec": 1
+    },
+    {
+      "exec": 2
+    },
+    {
+      "exec": 3
+    },
+    {
+      "exec": 4
+    },
+    {
+      "exec": 5
+    }
+  ],
+  "keys": [
+    {
+      "fader": 1,
+      "button": 1
+    },
+    {
+      "fader": 2,
+      "button": 1
+    },
+    {
+      "fader": 3,
+      "button": 1
+    },
+    {
+      "fader": 4,
+      "button": 1
+    },
+    {
+      "fader": 5,
+      "button": 1
+    },
+    {
+      "fader": 1,
+      "button": 2
+    },
+    {
+      "fader": 2,
+      "button": 2
+    },
+    {
+      "fader": 3,
+      "button": 2
+    },
+    {
+      "fader": 4,
+      "button": 2
+    },
+    {
+      "fader": 5,
+      "button": 2
+    },
+    {
+      "fader": 1,
+      "button": 3
+    },
+    {
+      "fader": 2,
+      "button": 3
+    },
+    {
+      "fader": 3,
+      "button": 3
+    },
+    {
+      "fader": 4,
+      "button": 3
+    },
+    {
+      "fader": 5,
+      "button": 3
+    },
+    {
+      "fader": 1,
+      "offset": 100
+    },
+    {
+      "fader": 2,
+      "offset": 100
+    },
+    {
+      "fader": 3,
+      "offset": 100
+    },
+    {
+      "fader": 4,
+      "offset": 100
+    },
+    {
+      "fader": 5,
+      "offset": 100
+    }
+  ],
+  "key_choices": [
+    {
+      "label": "Go+",
+      "cmd": "Go+"
+    },
+    {
+      "label": "Go-",
+      "cmd": "Go-"
+    },
+    {
+      "label": "Highlight",
+      "osc": "/luna/highlight",
+      "lit": "/luna/highlight"
+    },
+    {
+      "label": "Blind",
+      "osc": "/luna/blind",
+      "lit": "/luna/blind"
+    },
+    {
+      "label": "Release",
+      "cmd": "Release"
+    },
+    {
+      "label": "Clear all",
+      "cmd": "ClearAll"
+    },
+    {
+      "label": "Tap",
+      "osc": "/luna/speedmaster/1/tap"
+    }
+  ],
+  "encoders": [
+    {
+      "label": "Grand Master",
+      "adjust": "/luna/gm",
+      "value": "/luna/gm",
+      "range": [
+        0,
+        1
+      ],
+      "step": 0.01,
+      "format": "percent",
+      "click": "pad",
+      "pad": true,
+      "choices": [
+        {
+          "label": "Full",
+          "value": 1.0
+        },
+        {
+          "label": "75%",
+          "value": 0.75
+        },
+        {
+          "label": "50%",
+          "value": 0.5
+        },
+        {
+          "label": "25%",
+          "value": 0.25
+        },
+        {
+          "label": "Out",
+          "value": 0.0
+        }
+      ],
+      "follow": true
+    },
+    {
+      "label": "Page",
+      "page": 1,
+      "push": {
+        "screen": "keypad"
+      },
+      "follow": true
+    }
+  ],
+  "touch_buttons": [
+    {
+      "label": "Exec 106",
+      "exec": 106
+    },
+    {
+      "label": "Exec 107",
+      "exec": 107
+    },
+    {
+      "label": "Exec 108",
+      "exec": 108
+    },
+    {
+      "label": "Exec 109",
+      "exec": 109
+    },
+    {
+      "label": "Exec 110",
+      "exec": 110
+    },
+    {
+      "label": "Page -",
+      "page": -1
+    },
+    {
+      "label": "Page +",
+      "page": 1
+    },
+    {
+      "label": "Highlight",
+      "osc": "/luna/highlight",
+      "lit": "/luna/highlight"
+    },
+    {
+      "label": "Blind",
+      "osc": "/luna/blind",
+      "lit": "/luna/blind"
+    },
+    {
+      "label": "Release",
+      "cmd": "Release"
+    },
+    {
+      "label": "Clear all",
+      "cmd": "ClearAll",
+      "color": "5a2a2a"
+    },
+    {
+      "label": "Clear",
+      "key": "Clear"
+    },
+    {
+      "label": "Tap",
+      "osc": "/luna/speedmaster/1/tap",
+      "color": "1f5a7a",
+      "name": "/luna/speedmaster/1/bpm",
+      "name_format": "Tap\n{} BPM"
+    },
+    {
+      "label": "Masters",
+      "screen": "masters"
+    },
+    {
+      "label": "Macros",
+      "screen": "macros"
+    },
+    {
+      "label": "Keypad",
+      "screen": "keypad"
+    },
+    {
+      "label": "Encoders",
+      "screen": "encoders"
+    }
+  ],
+  "pickup": true,
+  "screen": {
+    "left": "Page {page}",
+    "middle": "cmdline",
+    "status": "link",
+    "link_name": "Luna",
+    "encoders": "follow",
+    "encoders_title": "Encoders",
+    "encoder_strip": true,
+    "columns": null
+  },
+  "feedback": {
+    "page": "/luna/page",
+    "exec_fader": "/luna/fader/{n}",
+    "exec_name": [
+      "/luna/fader/{n}/name",
+      "/luna/exec/{n}/name"
+    ],
+    "exec_run": [
+      "/luna/fader/{n}/running",
+      "/luna/exec/{n}"
+    ],
+    "enc_name": "/luna/encoder/{n}/name",
+    "enc_value": "/luna/encoder/{n}/value",
+    "enc_level": "/luna/encoder/{n}/level",
+    "enc_feature": "/luna/encoder/feature",
+    "enc_page": "/luna/encoder/page",
+    "enc_pages": "/luna/encoder/pages",
+    "cmdline": "/luna/cmdline",
+    "command": "/luna/cmdline/last",
+    "cmd_error": "/luna/cmdline/error"
+  },
+  "screens": {
+    "masters": {
+      "title": "Masters",
+      "columns": 3,
+      "back": "main",
+      "buttons": [
+        {
+          "label": "Speed 1 Tap",
+          "osc": "/luna/speedmaster/1/tap",
+          "color": "1f5a7a",
+          "name": "/luna/speedmaster/1/bpm",
+          "name_format": "Speed 1 Tap\n{} BPM"
+        },
+        {
+          "label": "Speed 1 /2",
+          "osc": "/luna/speedmaster/1/half"
+        },
+        {
+          "label": "Speed 1 x2",
+          "osc": "/luna/speedmaster/1/double"
+        },
+        {
+          "label": "Speed 2 Tap",
+          "osc": "/luna/speedmaster/2/tap",
+          "color": "1f5a7a",
+          "name": "/luna/speedmaster/2/bpm",
+          "name_format": "Speed 2 Tap\n{} BPM"
+        },
+        {
+          "label": "Speed 2 /2",
+          "osc": "/luna/speedmaster/2/half"
+        },
+        {
+          "label": "Speed 2 x2",
+          "osc": "/luna/speedmaster/2/double"
+        },
+        {
+          "label": "Timing 1 Reset",
+          "osc": "/luna/timingmaster/1/reset",
+          "name": "/luna/timingmaster/1/multiplier",
+          "name_format": "Timing 1 x{}\nReset"
+        },
+        {
+          "label": "Timing 2 Reset",
+          "osc": "/luna/timingmaster/2/reset",
+          "name": "/luna/timingmaster/2/multiplier",
+          "name_format": "Timing 2 x{}\nReset"
+        },
+        {
+          "label": "Clear all",
+          "cmd": "ClearAll",
+          "color": "5a2a2a"
+        }
+      ]
+    },
+    "macros": {
+      "title": "Macros",
+      "columns": 4,
+      "back": "main",
+      "buttons": [
+        {
+          "label": "Macro 1",
+          "osc": "/luna/macro/1"
+        },
+        {
+          "label": "Macro 2",
+          "osc": "/luna/macro/2"
+        },
+        {
+          "label": "Macro 3",
+          "osc": "/luna/macro/3"
+        },
+        {
+          "label": "Macro 4",
+          "osc": "/luna/macro/4"
+        },
+        {
+          "label": "Macro 5",
+          "osc": "/luna/macro/5"
+        },
+        {
+          "label": "Macro 6",
+          "osc": "/luna/macro/6"
+        },
+        {
+          "label": "Macro 7",
+          "osc": "/luna/macro/7"
+        },
+        {
+          "label": "Macro 8",
+          "osc": "/luna/macro/8"
+        },
+        {
+          "label": "Macro 9",
+          "osc": "/luna/macro/9"
+        },
+        {
+          "label": "Macro 10",
+          "osc": "/luna/macro/10"
+        },
+        {
+          "label": "Macro 11",
+          "osc": "/luna/macro/11"
+        },
+        {
+          "label": "Macro 12",
+          "osc": "/luna/macro/12"
+        },
+        {
+          "label": "Stop 1",
+          "osc": "/luna/macro/1/stop",
+          "color": "5a2a2a"
+        },
+        {
+          "label": "Stop 2",
+          "osc": "/luna/macro/2/stop",
+          "color": "5a2a2a"
+        },
+        {
+          "label": "Stop 3",
+          "osc": "/luna/macro/3/stop",
+          "color": "5a2a2a"
+        },
+        {
+          "label": "Stop 4",
+          "osc": "/luna/macro/4/stop",
+          "color": "5a2a2a"
+        }
+      ]
+    },
+    "keypad": {
+      "type": "keypad",
+      "keys": [
+        [
+          "Fixture",
+          "Group",
+          "7",
+          "8",
+          "9"
+        ],
+        [
+          "Preset",
+          "Sequence",
+          "4",
+          "5",
+          "6"
+        ],
+        [
+          "Cue",
+          "Thru",
+          "1",
+          "2",
+          "3"
+        ],
+        [
+          "At",
+          "Full",
+          "0",
+          ".",
+          {
+            "label": "Enter",
+            "cmdline": "please"
+          }
+        ],
+        [
+          {
+            "label": "Back",
+            "screen": "main"
+          },
+          "Off",
+          {
+            "label": "Clear",
+            "cmdline": "clear"
+          },
+          {
+            "label": "Del",
+            "cmdline": "backspace"
+          },
+          "Go+"
+        ]
+      ]
+    }
+  },
+  "midi": [
+    {
+      "device": "APC Mini",
+      "map": {
+        "pads": [
+          {
+            "exec": 101
+          },
+          {
+            "exec": 102
+          },
+          {
+            "exec": 103
+          },
+          {
+            "exec": 104
+          },
+          {
+            "exec": 105
+          },
+          {
+            "exec": 106
+          },
+          {
+            "exec": 107
+          },
+          {
+            "exec": 108
+          },
+          {
+            "exec": 1,
+            "button": 3
+          },
+          {
+            "exec": 2,
+            "button": 3
+          },
+          {
+            "exec": 3,
+            "button": 3
+          },
+          {
+            "exec": 4,
+            "button": 3
+          },
+          {
+            "exec": 5,
+            "button": 3
+          },
+          {
+            "exec": 6,
+            "button": 3
+          },
+          {
+            "exec": 7,
+            "button": 3
+          },
+          {
+            "exec": 8,
+            "button": 3
+          },
+          {
+            "exec": 1,
+            "button": 2
+          },
+          {
+            "exec": 2,
+            "button": 2
+          },
+          {
+            "exec": 3,
+            "button": 2
+          },
+          {
+            "exec": 4,
+            "button": 2
+          },
+          {
+            "exec": 5,
+            "button": 2
+          },
+          {
+            "exec": 6,
+            "button": 2
+          },
+          {
+            "exec": 7,
+            "button": 2
+          },
+          {
+            "exec": 8,
+            "button": 2
+          },
+          {
+            "exec": 1,
+            "button": 1
+          },
+          {
+            "exec": 2,
+            "button": 1
+          },
+          {
+            "exec": 3,
+            "button": 1
+          },
+          {
+            "exec": 4,
+            "button": 1
+          },
+          {
+            "exec": 5,
+            "button": 1
+          },
+          {
+            "exec": 6,
+            "button": 1
+          },
+          {
+            "exec": 7,
+            "button": 1
+          },
+          {
+            "exec": 8,
+            "button": 1
+          },
+          {
+            "osc": "/luna/macro/1",
+            "label": "Macro 1"
+          },
+          {
+            "osc": "/luna/macro/2",
+            "label": "Macro 2"
+          },
+          {
+            "osc": "/luna/macro/3",
+            "label": "Macro 3"
+          },
+          {
+            "osc": "/luna/macro/4",
+            "label": "Macro 4"
+          },
+          {
+            "osc": "/luna/macro/5",
+            "label": "Macro 5"
+          },
+          {
+            "osc": "/luna/macro/6",
+            "label": "Macro 6"
+          },
+          {
+            "osc": "/luna/macro/7",
+            "label": "Macro 7"
+          },
+          {
+            "osc": "/luna/macro/8",
+            "label": "Macro 8"
+          },
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {}
+        ],
+        "track": [
+          {
+            "page": -1
+          },
+          {
+            "page": 1
+          },
+          {
+            "key": "Clear"
+          },
+          {
+            "cmd": "Go-"
+          },
+          {
+            "cmd": "Go+"
+          },
+          {
+            "osc": "/luna/highlight",
+            "lit": "/luna/highlight"
+          },
+          {
+            "osc": "/luna/blind",
+            "lit": "/luna/blind"
+          },
+          {
+            "key": "Please"
+          }
+        ],
+        "scene": [
+          {
+            "goto_page": 1
+          },
+          {
+            "goto_page": 2
+          },
+          {
+            "goto_page": 3
+          },
+          {
+            "goto_page": 4
+          },
+          {
+            "goto_page": 5
+          },
+          {
+            "goto_page": 6
+          },
+          {
+            "goto_page": 7
+          },
+          {
+            "goto_page": 8
+          }
+        ],
+        "faders": [
+          {
+            "exec": 1
+          },
+          {
+            "exec": 2
+          },
+          {
+            "exec": 3
+          },
+          {
+            "exec": 4
+          },
+          {
+            "exec": 5
+          },
+          {
+            "exec": 6
+          },
+          {
+            "exec": 7
+          },
+          {
+            "exec": 8
+          },
+          {
+            "osc": "/luna/gm",
+            "label": "Grand master"
+          }
+        ]
+      }
+    },
+    {
+      "device": "APC mini mk2",
+      "map": {
+        "pads": [
+          {
+            "exec": 101
+          },
+          {
+            "exec": 102
+          },
+          {
+            "exec": 103
+          },
+          {
+            "exec": 104
+          },
+          {
+            "exec": 105
+          },
+          {
+            "exec": 106
+          },
+          {
+            "exec": 107
+          },
+          {
+            "exec": 108
+          },
+          {
+            "exec": 1,
+            "button": 3
+          },
+          {
+            "exec": 2,
+            "button": 3
+          },
+          {
+            "exec": 3,
+            "button": 3
+          },
+          {
+            "exec": 4,
+            "button": 3
+          },
+          {
+            "exec": 5,
+            "button": 3
+          },
+          {
+            "exec": 6,
+            "button": 3
+          },
+          {
+            "exec": 7,
+            "button": 3
+          },
+          {
+            "exec": 8,
+            "button": 3
+          },
+          {
+            "exec": 1,
+            "button": 2
+          },
+          {
+            "exec": 2,
+            "button": 2
+          },
+          {
+            "exec": 3,
+            "button": 2
+          },
+          {
+            "exec": 4,
+            "button": 2
+          },
+          {
+            "exec": 5,
+            "button": 2
+          },
+          {
+            "exec": 6,
+            "button": 2
+          },
+          {
+            "exec": 7,
+            "button": 2
+          },
+          {
+            "exec": 8,
+            "button": 2
+          },
+          {
+            "exec": 1,
+            "button": 1
+          },
+          {
+            "exec": 2,
+            "button": 1
+          },
+          {
+            "exec": 3,
+            "button": 1
+          },
+          {
+            "exec": 4,
+            "button": 1
+          },
+          {
+            "exec": 5,
+            "button": 1
+          },
+          {
+            "exec": 6,
+            "button": 1
+          },
+          {
+            "exec": 7,
+            "button": 1
+          },
+          {
+            "exec": 8,
+            "button": 1
+          },
+          {
+            "osc": "/luna/macro/1",
+            "label": "Macro 1"
+          },
+          {
+            "osc": "/luna/macro/2",
+            "label": "Macro 2"
+          },
+          {
+            "osc": "/luna/macro/3",
+            "label": "Macro 3"
+          },
+          {
+            "osc": "/luna/macro/4",
+            "label": "Macro 4"
+          },
+          {
+            "osc": "/luna/macro/5",
+            "label": "Macro 5"
+          },
+          {
+            "osc": "/luna/macro/6",
+            "label": "Macro 6"
+          },
+          {
+            "osc": "/luna/macro/7",
+            "label": "Macro 7"
+          },
+          {
+            "osc": "/luna/macro/8",
+            "label": "Macro 8"
+          },
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {}
+        ],
+        "track": [
+          {
+            "page": -1
+          },
+          {
+            "page": 1
+          },
+          {
+            "key": "Clear"
+          },
+          {
+            "cmd": "Go-"
+          },
+          {
+            "cmd": "Go+"
+          },
+          {
+            "osc": "/luna/highlight",
+            "lit": "/luna/highlight"
+          },
+          {
+            "osc": "/luna/blind",
+            "lit": "/luna/blind"
+          },
+          {
+            "key": "Please"
+          }
+        ],
+        "scene": [
+          {
+            "goto_page": 1
+          },
+          {
+            "goto_page": 2
+          },
+          {
+            "goto_page": 3
+          },
+          {
+            "goto_page": 4
+          },
+          {
+            "goto_page": 5
+          },
+          {
+            "goto_page": 6
+          },
+          {
+            "goto_page": 7
+          },
+          {
+            "goto_page": 8
+          }
+        ],
+        "faders": [
+          {
+            "exec": 1
+          },
+          {
+            "exec": 2
+          },
+          {
+            "exec": 3
+          },
+          {
+            "exec": 4
+          },
+          {
+            "exec": 5
+          },
+          {
+            "exec": 6
+          },
+          {
+            "exec": 7
+          },
+          {
+            "exec": 8
+          },
+          {
+            "osc": "/luna/gm",
+            "label": "Grand master"
+          }
+        ]
+      }
+    },
+    {
+      "device": "Midi Fighter Spectra",
+      "map": {
+        "buttons": [
+          {
+            "exec": 101
+          },
+          {
+            "exec": 102
+          },
+          {
+            "exec": 103
+          },
+          {
+            "exec": 104
+          },
+          {
+            "exec": 1,
+            "button": 3
+          },
+          {
+            "exec": 2,
+            "button": 3
+          },
+          {
+            "exec": 3,
+            "button": 3
+          },
+          {
+            "exec": 4,
+            "button": 3
+          },
+          {
+            "exec": 1,
+            "button": 2
+          },
+          {
+            "exec": 2,
+            "button": 2
+          },
+          {
+            "exec": 3,
+            "button": 2
+          },
+          {
+            "exec": 4,
+            "button": 2
+          },
+          {
+            "exec": 1,
+            "button": 1
+          },
+          {
+            "exec": 2,
+            "button": 1
+          },
+          {
+            "exec": 3,
+            "button": 1
+          },
+          {
+            "exec": 4,
+            "button": 1
+          },
+          {
+            "exec": 105
+          },
+          {
+            "exec": 106
+          },
+          {
+            "exec": 107
+          },
+          {
+            "exec": 108
+          },
+          {
+            "exec": 5,
+            "button": 3
+          },
+          {
+            "exec": 6,
+            "button": 3
+          },
+          {
+            "exec": 7,
+            "button": 3
+          },
+          {
+            "exec": 8,
+            "button": 3
+          },
+          {
+            "exec": 5,
+            "button": 2
+          },
+          {
+            "exec": 6,
+            "button": 2
+          },
+          {
+            "exec": 7,
+            "button": 2
+          },
+          {
+            "exec": 8,
+            "button": 2
+          },
+          {
+            "exec": 5,
+            "button": 1
+          },
+          {
+            "exec": 6,
+            "button": 1
+          },
+          {
+            "exec": 7,
+            "button": 1
+          },
+          {
+            "exec": 8,
+            "button": 1
+          },
+          {
+            "exec": 109
+          },
+          {
+            "exec": 110
+          },
+          {
+            "exec": 111
+          },
+          {
+            "exec": 112
+          },
+          {
+            "exec": 9,
+            "button": 3
+          },
+          {
+            "exec": 10,
+            "button": 3
+          },
+          {
+            "exec": 11,
+            "button": 3
+          },
+          {
+            "exec": 12,
+            "button": 3
+          },
+          {
+            "exec": 9,
+            "button": 2
+          },
+          {
+            "exec": 10,
+            "button": 2
+          },
+          {
+            "exec": 11,
+            "button": 2
+          },
+          {
+            "exec": 12,
+            "button": 2
+          },
+          {
+            "exec": 9,
+            "button": 1
+          },
+          {
+            "exec": 10,
+            "button": 1
+          },
+          {
+            "exec": 11,
+            "button": 1
+          },
+          {
+            "exec": 12,
+            "button": 1
+          },
+          {
+            "exec": 113
+          },
+          {
+            "exec": 114
+          },
+          {
+            "exec": 115
+          },
+          {
+            "exec": 116
+          },
+          {
+            "exec": 13,
+            "button": 3
+          },
+          {
+            "exec": 14,
+            "button": 3
+          },
+          {
+            "exec": 15,
+            "button": 3
+          },
+          {
+            "exec": 16,
+            "button": 3
+          },
+          {
+            "exec": 13,
+            "button": 2
+          },
+          {
+            "exec": 14,
+            "button": 2
+          },
+          {
+            "exec": 15,
+            "button": 2
+          },
+          {
+            "exec": 16,
+            "button": 2
+          },
+          {
+            "exec": 13,
+            "button": 1
+          },
+          {
+            "exec": 14,
+            "button": 1
+          },
+          {
+            "exec": 15,
+            "button": 1
+          },
+          {
+            "exec": 16,
+            "button": 1
+          }
+        ]
+      }
+    }
+  ],
+  "encoder_features": [
+    "Intensity",
+    "Color",
+    "Position",
+    "Beam",
+    "Gobo",
+    "Control"
+  ]
+}

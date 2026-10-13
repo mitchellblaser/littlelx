@@ -661,7 +661,9 @@ class Midi:
 
     def target_level(self, item):
         ex = item.get("exec")
-        if ex is not None and not self.b.generic() and self.b.ma_linked():
+        if ex is not None and self.b.generic():  # its level from the target's feedback
+            return self.b.fb["exec_fader"].get(ex)
+        if ex is not None and self.b.ma_linked():
             return self.b.ma["fader"].get(ex)
         return None
 
