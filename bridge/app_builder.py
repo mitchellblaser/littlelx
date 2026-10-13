@@ -362,11 +362,14 @@ class ButtonList(QWidget):
 
 class ConnectionPage(QWidget):
     GEN = ("fader", "key", "encoder", "push", "button", "page", "command", "set",
-           "exec", "exec_button", "exec_fader", "enc_feature", "enc_next", "enc_prev", "enc_set", "ping")
+           "exec", "exec_button", "exec_fader", "enc_feature", "enc_next", "enc_prev", "enc_set",
+           "enc_res", "enc_slot", "ping", "ping_quiet")
     GEN_LABELS = {"exec": "Executor button", "exec_button": "Executor's fader button ({b})",
                   "exec_fader": "Executor fader", "ping": "Ping (every 2 s)",
                   "enc_feature": "Encoder bank (followed)", "enc_next": "Encoder page +",
-                  "enc_prev": "Encoder page -", "enc_set": "Typed value (command)"}
+                  "enc_prev": "Encoder page -", "enc_set": "Typed value (command)",
+                  "enc_res": "Encoder resolution (step)", "enc_slot": "Encoder wheel slot",
+                  "ping_quiet": "Ping after this many s of quiet"}
 
     def __init__(self):
         super().__init__()
@@ -472,7 +475,8 @@ class ConnectionPage(QWidget):
         put(c, "ma_line", self.ma_line.text().strip())
         c["fader_interval"] = round(self.interval.value(), 3)
         c["fader_jump"] = round(self.jump.value(), 2)
-        c["generic"] = {k: e.text().strip() for k, e in self.gen.items() if e.text().strip()}
+        c["generic"] = {k: num_or_text(e.text().strip()) if k == "ping_quiet" else e.text().strip()
+                        for k, e in self.gen.items() if e.text().strip()}
         vals = {"fader": [num_or_text(self.fader_lo.text() or "0"), num_or_text(self.fader_hi.text() or "1")],
                 "encoder": num_or_text(self.enc_step.text() or "1"), "integer": self.integer.isChecked()}
         for k, (on, off) in self.onoff.items():

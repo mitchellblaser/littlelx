@@ -106,7 +106,10 @@ DEFAULTS = {
                     "enc_feature": "",   # the encoder bank to show (its name)
                     "enc_next": "", "enc_prev": "",   # the bank's next / previous page
                     "enc_set": "",       # a typed value: a command, {feature} {attribute} {value}
-                    "ping": ""},          # sent every 2 s (keeps the link status fresh), "" = none
+                    "enc_res": "",       # steps the encoders' resolution (Fine button)
+                    "enc_slot": "",      # puts encoder {n}'s wheel on a slot (its number, from 1)
+                    "ping": "",          # sent when the target has been quiet (keeps "linked" fresh), "" = none
+                    "ping_quiet": 2},    # s of quiet before a ping
         # generic: the values sent (and fader feedback read the same way)
         "values": {"fader": [0, 1],     # fader range (bottom, top)
                    "key": [1, 0],       # keys: pressed, released
@@ -1205,7 +1208,7 @@ class Screen:
             alive = b.ma_seen and time.time() - b.ma_seen < 5  # any OSC coming back
             text, color = f"OSC > {b.cfg['osc']['host']}:{b.cfg['osc']['port']}", C_OK if alive else C_DIM
         elif mode == "link":  # the target's name: linked while its OSC comes back
-            alive = b.ma_seen and time.time() - b.ma_seen < 5
+            alive = b.link_alive()
             who = b.screen_opt("link_name") or b.cfg.get("profile") or "OSC"
             text, color = (f"{who} linked", C_OK) if alive else (f"{who}: no reply", C_DIM)
         elif mode == "feedback":
@@ -1517,10 +1520,11 @@ class Screen:
                 self.setw(base + 4, text=f" {i + 1}: {e['pretty']}", colors=(shade(gcolor, 0.4), C_TEXT, C_PANEL))
                 self.setw(base + 1, text=e["value"] or "-",  # like MA: red in the programmer, else grey
                           colors=(C_PANEL, C_PROG if e["prog"] else C_VALUE, C_PANEL))
-                res = res_label(e["res"])
-                # MA: Coarse/Fine/Ultra; generic: holds the target encoder's push (fine)
+                res = res_label(e["res"]) if not (b.generic() and b.enc_resolution) else b.enc_resolution
+                # MA: Coarse/Fine/Ultra; generic: the target's resolution (or its push held)
                 self.keymap[base + 2] = {"fine": e["n"]} if b.generic() else {"resolution": e["attr"]}
-                self.setw(base + 2, value=1 if res != "Coarse" else 0, text=res, colors=(C_BTN, C_TEXT, C_BTN_ON))
+                self.setw(base + 2, value=1 if res not in ("Coarse", "Normal") else 0, text=res,
+                          colors=(C_BTN, C_TEXT, C_BTN_ON))
                 continue
             what, res = self.encoder_info(i)
             self.setw(base + 1, text=what, colors=(C_PANEL, C_TEXT, C_PANEL))
@@ -2035,7 +2039,7 @@ class Screen:
         elif "encpage" in act:
             self.b.next_enc_page()
         elif "fine" in act:
-            self.b.toggle_fine(act["fine"])
+            self.b.fine_button(act["fine"])
         elif "fgroups" in act:
             if self.b.ma["groups"]:
                 self.set_screen("fgroups")
@@ -2166,6 +2170,7 @@ class Bridge:
         self.enc_checked = [0.0, 0.0]
         self.enc_turned_at = [0.0, 0.0]          # generic "adjust" encoders: last turn
         self.enc_fine = set()                    # generic: target encoders held fine (their push)
+        self.enc_resolution = ""                 # generic: the target's encoder resolution
         self.enc_bank_page, self.enc_bank_pages = 1, 1   # generic: the encoder bank's page
         self.enc_rest = [{}, {}]              # settled state -> times seen
         self.ma_values = {}                  # (page, exec) -> 0..100 from plain OSC feedback
@@ -2249,8 +2254,10 @@ class Bridge:
                 return
             if not isinstance(addr, str) or not addr.startswith("/"):
                 return
-            rx = re.escape(addr).replace(r"\{n\}", r"(\d+)")
-            rules.append((re.compile(rx + "$"), kind, n))
+            # {n} = the number; {n-100}: the target's number is ours - 100
+            shift = re.search(r"\{n([+-]\d+)\}", addr)
+            rx = re.escape(re.sub(r"\{n(?:[+-]\d+)?\}", "NUMBERxN", addr)).replace("NUMBERxN", r"(\d+)")
+            rules.append((re.compile(rx + "$"), kind, n, -int(shift.group(1)) if shift else 0))
         for i, f in enumerate(self.cfg.get("faders", [])):  # items' own addresses first
             if f and f.get("feedback"):
                 add(f["feedback"], "fader", i + 1)
@@ -2276,11 +2283,13 @@ class Bridge:
 
     def on_feedback(self, addr, args):
         """OSC from a generic target (or extra feedback in any profile)."""
-        for rx, kind, fixed in self.fb_rules:
+        for rx, kind, fixed, shift in self.fb_rules:
             m = rx.match(addr)
             if not m:
                 continue
             val = args[0] if args else None
+            if kind == "enc_slots":  # every value: a wheel's slot names
+                val = [str(a) for a in args]
             if kind in ("lit", "name"):  # a button's own address
                 self.fb[kind][fixed] = truthy(val) if kind == "lit" else str(val if val is not None else "")
                 self.fb["seen"] = time.time()
@@ -2288,7 +2297,7 @@ class Bridge:
                 if self.pi_ready:
                     self.screen.update_buttons()
                 return True
-            n = fixed or (int(m.group(1)) if m.groups() else None)
+            n = fixed or (int(m.group(1)) + shift if m.groups() else None)
             self.fb["seen"] = time.time()
             self.midi.dirty = True
             scr = self.screen if self.pi_ready else None
@@ -2431,10 +2440,21 @@ class Bridge:
         unit = e.get("unit")
         return f"{text} {unit}" if unit else text
 
+    def generic_opt(self, what, default=None):
+        """A generic profile's setting in "generic" that isn't an address."""
+        v = (self.cfg["osc"].get("generic") or {}).get(what)
+        return default if v in (None, "") else v
+
+    def link_alive(self):
+        """Generic: the target answered lately (it may only send changes, so a
+        ping when it's quiet keeps this fresh)."""
+        return bool(self.ma_seen) and time.time() - self.ma_seen < max(5.0, float(self.generic_opt("ping_quiet", 2)) + 3)
+
     def generic_addr(self, what, n=0, b=1):
         """A generic profile's address for what ({n} = number, {b} = fader button)."""
         addrs = self.cfg["osc"].get("generic") or {}
         addr = addrs.get(what) or DEFAULTS["osc"]["generic"][what]
+        addr = re.sub(r"\{n([+-]\d+)\}", lambda m: str(int(n) + int(m.group(1))), addr)  # {n-100}
         return addr.replace("{n}", str(n)).replace("{b}", str(b))
 
     def generic_send(self, what, n, value):
@@ -2514,7 +2534,7 @@ class Bridge:
     # ---- following MA's encoders: hardware encoder i = MA encoder 2*page + i
     def ma_encoders_on(self):
         if self.generic():  # the target reports its encoders, and something is on them
-            linked = time.time() - self.ma_seen < 6
+            linked = self.link_alive()
             on = linked and any(e.get("attr") for e in self.ma["encs"].values())
         else:
             on = self.ma_linked() and self.ma["encn"] > 0
@@ -2549,8 +2569,22 @@ class Bridge:
                 e["value"] = text
             else:
                 e["level"] = number(val)
-            e["res"] = 0.1 if n in self.enc_fine else 1.0
+            e["res"] = self.enc_res_factor(n)
             ma["encn"] = max(ma["encn"], n, 2)
+        elif kind == "enc_resolution":
+            self.enc_resolution = text
+            for e in ma["encs"].values():
+                e["res"] = self.enc_res_factor()
+        elif kind in ("enc_slots", "enc_slot") and n:
+            e = ma["encs"].setdefault(n, dict(attr="", pretty="", value="", prog=False, res=1.0, n=n))
+            if kind == "enc_slots":
+                e["slots"] = [t for t in (val or []) if t]
+            else:
+                e["slot"] = int(number(val) or 0)
+            if self.pi_ready and self.screen.name.startswith("entry"):
+                i = int(self.screen.name[5:])
+                if self.following(i) and self.followed(i) == n and kind == "enc_slots":
+                    self.screen.draw_value_entry(i, keep=True)
         elif kind == "enc_feature":
             if text != ma["feat"][1]:
                 self.enc_page = 0  # another bank: start at its first pair
@@ -2598,6 +2632,24 @@ class Bridge:
             for _ in range(abs(steps)):
                 self.osc(addr, 1)
 
+    RES_FACTORS = {"max": 10.0, "normal": 1.0, "fine": 0.1, "ultra": 0.01}
+
+    def enc_res_factor(self, n=None):
+        """Generic: an encoder's step factor for the Fine button (the target's
+        reported resolution, or its push held here)."""
+        if n is not None and n in self.enc_fine:
+            return 0.1
+        return self.RES_FACTORS.get(self.enc_resolution.lower(), 1.0)
+
+    def fine_button(self, n):
+        """Generic Fine button: steps the target's resolution if it can, else
+        holds encoder n's push."""
+        addr = self.generic_addr("enc_res")
+        if addr.startswith("/"):
+            self.osc(addr)  # no value: the next resolution
+        else:
+            self.toggle_fine(n)
+
     def toggle_fine(self, n):
         """Generic: hold (or let go of) the target encoder n's push: it turns fine."""
         on = n not in self.enc_fine
@@ -2644,8 +2696,9 @@ class Bridge:
 
     def choices(self, i):
         """Names offered on encoder i's value page."""
-        if self.generic() and self.following(i):
-            return []
+        if self.generic() and self.following(i):  # the target encoder's wheel slots, if any
+            e = self.ma_encoder(i)
+            return list(e.get("slots") or []) if e else []
         src = self.enc_cfg(i).get("choices", None if self.generic() else "ma")
         if isinstance(src, list):
             return [str(c.get("label", c.get("value", "?"))) if isinstance(c, dict) else str(c) for c in src]
@@ -2656,6 +2709,11 @@ class Bridge:
 
     def apply_choice(self, i, k):
         """The k-th (from 1) choice on encoder i's value page."""
+        if self.generic() and self.following(i):  # a wheel slot, by number
+            addr = self.generic_addr("enc_slot", self.followed(i))
+            if addr.startswith("/"):
+                self.osc(addr, int(k))
+            return
         src = self.enc_cfg(i).get("choices", None if self.generic() else "ma")
         if isinstance(src, list):
             if 0 < k <= len(src):
@@ -3516,7 +3574,8 @@ class Bridge:
             self.midi.pi.lost()  # what was plugged into it went with it
             self.usb_modules = {}
         self.midi.tick(now)
-        if self.generic() and now - self.ping_at > 2:  # keeps "linked" fresh while nothing changes
+        quiet = float(self.generic_opt("ping_quiet", 2))
+        if self.generic() and now - self.ping_at > quiet and now - self.ma_seen > quiet:  # quiet: still there?
             self.ping_at = now
             ping = self.generic_addr("ping")
             if ping.startswith("/"):

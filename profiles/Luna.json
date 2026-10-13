@@ -16,14 +16,17 @@
       "page": "/luna/page/{n}",
       "command": "/luna/cmd",
       "set": "/luna/encoder/{n}/set",
-      "exec": "/luna/exec/{n}",
+      "exec": "/luna/button/{n-100}",
       "exec_button": "/luna/fader/{n}/button/{b}",
       "exec_fader": "/luna/fader/{n}",
       "ping": "/luna/ping",
       "enc_feature": "/luna/encoder/feature",
       "enc_next": "/luna/encoder/page/next",
       "enc_prev": "/luna/encoder/page/previous",
-      "enc_set": "{feature} {attribute} At {value}"
+      "enc_set": "{feature} {attribute} At {value}",
+      "enc_res": "/luna/encoder/resolution",
+      "enc_slot": "/luna/encoder/{n}/slot",
+      "ping_quiet": 10
     },
     "values": {
       "fader": [
@@ -227,23 +230,23 @@
   ],
   "touch_buttons": [
     {
-      "label": "Exec 106",
+      "label": "B6",
       "exec": 106
     },
     {
-      "label": "Exec 107",
+      "label": "B7",
       "exec": 107
     },
     {
-      "label": "Exec 108",
+      "label": "B8",
       "exec": 108
     },
     {
-      "label": "Exec 109",
+      "label": "B9",
       "exec": 109
     },
     {
-      "label": "Exec 110",
+      "label": "B10",
       "exec": 110
     },
     {
@@ -317,11 +320,11 @@
     "exec_fader": "/luna/fader/{n}",
     "exec_name": [
       "/luna/fader/{n}/name",
-      "/luna/exec/{n}/name"
+      "/luna/button/{n-100}/name"
     ],
     "exec_run": [
       "/luna/fader/{n}/running",
-      "/luna/exec/{n}"
+      "/luna/button/{n-100}"
     ],
     "enc_name": "/luna/encoder/{n}/name",
     "enc_value": "/luna/encoder/{n}/value",
@@ -331,7 +334,14 @@
     "enc_pages": "/luna/encoder/pages",
     "cmdline": "/luna/cmdline",
     "command": "/luna/cmdline/last",
-    "cmd_error": "/luna/cmdline/error"
+    "cmd_error": "/luna/cmdline/error",
+    "exec_color": [
+      "/luna/fader/{n}/color",
+      "/luna/button/{n-100}/color"
+    ],
+    "enc_resolution": "/luna/encoder/resolution",
+    "enc_slots": "/luna/encoder/{n}/slots",
+    "enc_slot": "/luna/encoder/{n}/slot"
   },
   "screens": {
     "masters": {
