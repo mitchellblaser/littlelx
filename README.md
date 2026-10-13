@@ -410,7 +410,8 @@ above. With grandMA3 the plugin reports MA's state; a `"feedback"` section there
 adds to it.
 
 Actions (keys, touchscreen buttons, keypad keys, encoder pushes, MIDI pads): `{"exec": 201}`
-(executor button; generic: to the `exec` address, or with `"button": 2` to that
+(executor button; generic: to the `exec` address - `{n-100}` in an address shifts
+the number, e.g. `/luna/button/{n-100}` for executor 101 -> button 1 -, or with `"button": 2` to that
 fader's button at `exec_button`), `{"fader": 2, "button": 1}` (a button of whatever
 executor controller fader 2 is set to; `"offset": 100` = its strip's button executor,
 e.g. fader on 3 -> executor 103), `{"key": "Store"}` (command-line key), `{"cmd": "Go+"}`
@@ -457,17 +458,21 @@ profile's `"color"`.
 
 | Control | Does |
 |---------|------|
-| Faders 1–5 | Faders 1–5 of Luna's current page (names, levels, pickup, "> name" while running) |
+| Faders 1–5 | Faders F1–F5 of Luna's current page (names, colours, levels, pickup, "> name" while running) |
 | Keys 1–5, 6–10, 11–15 | The buttons of the fader above them: button 1, 2, 3 (what each does is set in Luna, per sequence) |
-| Keys 16–20 | The button executor of that fader's strip (fader 1 -> 101, ...) |
-| Encoders | Follow Luna's attribute encoders while fixtures are selected (pair 1–2 / 3–4, click = hold for fine; Encoders page: bank, its pages, values, Fine, tap a value to type it) |
+| Keys 16–20 | The button of that fader's strip (fader F1 -> button B1, ...) |
+| Encoders | Follow Luna's attribute encoders while fixtures are selected (pair 1–2 / 3–4, click = hold for fine; Encoders page: bank, its pages, values, resolution (Fine / Normal / Max), tap a value to type it or pick a gobo / colour slot by name) |
 | … nothing selected | Encoder 1: Grand Master (%; click: Full / 75 / 50 / 25 / Out or type a %); encoder 2: Page −/+, push = Keypad |
-| Touchscreen | Button executors 106–110 (their names, lit while running), Page −/+, Highlight and Blind (lit while on), Release, Clear all, Clear, Tap (Speed Master 1, with its BPM); Masters (Speed Masters with BPM, Timing Masters with their ×), Macros and a Luna keypad |
-| MIDI | APC Mini / mk2: faders 1–8 + Grand Master, pads = executors 101–108, fader buttons, macros; Midi Fighter Spectra: 4 faders' buttons + executor per bank |
+| Touchscreen | Buttons B6–B10 (their names and colours, lit while running), Page −/+, Highlight and Blind (lit while on), Release, Clear all, Clear, Tap (Speed Master 1, with its BPM); Masters (Speed Masters with BPM, Timing Masters with their ×), Macros and a Luna keypad |
+| MIDI | APC Mini / mk2: faders 1–8 + Grand Master, pads = buttons B1–B8, fader buttons, macros; Midi Fighter Spectra: 4 faders' buttons + their B buttons per bank |
 
-The keys follow the faders: set fader 1 to `{"exec": 7}` and its keys work fader 7's
-buttons and executor 107. In Setup, a key's choices start with the buttons of the
+The keys follow the faders: set fader 1 to `{"exec": 7}` and its keys work fader F7's
+buttons and button B7. (Inside the profile, Luna's buttons B1, B2... are executors
+101, 102...) In Setup, a key's choices start with the buttons of the
 fader in its column.
+
+When Luna has been quiet for 10 s the bridge pings it, and Luna sends everything
+again, so names, levels and encoders fill in even when the bridge starts after Luna.
 
 The top bar shows the page, Luna's command line as it's typed at the desk (then
 the last one run, and why it failed if it did) and **Luna linked** while Luna answers.
