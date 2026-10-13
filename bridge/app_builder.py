@@ -58,6 +58,8 @@ def describe(act):
     """Short text for an action (lists, key grid)."""
     if not act:
         return "-"
+    if "exec" in act and act.get("button"):
+        return f"Exec {act['exec']}.{act['button']}"
     for k, f in (("exec", "Exec {}"), ("osc", "OSC {}"), ("cmd", "Cmd {}"), ("key", "Key {}"),
                  ("screen", "Screen {}"), ("cmdline", "Keypad {}"), ("resolution", "Coarse/Fine {}")):
         if k in act:
@@ -152,7 +154,11 @@ class ActionDialog(QDialog):
         self.exec_no = QSpinBox()
         self.exec_no.setRange(1, 9999)
         self.exec_no.setValue(int(act.get("exec", 101)))
-        page("exec", [("Executor", self.exec_no)])
+        self.exec_btn = QSpinBox()
+        self.exec_btn.setRange(0, 9)
+        self.exec_btn.setSpecialValueText("its own button")
+        self.exec_btn.setValue(int(act.get("button") or 0))
+        page("exec", [("Executor", self.exec_no), ("Fader button (generic)", self.exec_btn)])
         self.key = QComboBox()
         self.key.setEditable(True)
         self.key.addItems(CMD_KEYS)
@@ -214,7 +220,7 @@ class ActionDialog(QDialog):
             form.addRow("Lit by MA state", self.state)
         self.extra = {k: v for k, v in act.items() if k not in
                       ("label", "color", "lit_color", "text_color", "lit", "state", "on", "off")
-                      and k not in [t for _, t in ACTION_TYPES if t]}
+                      and k not in [t for _, t in ACTION_TYPES if t] and k != "button"}
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         bb.accepted.connect(self.accept)
         bb.rejected.connect(self.reject)
@@ -225,6 +231,8 @@ class ActionDialog(QDialog):
         a = dict(self.extra)
         if t == "exec":
             a["exec"] = self.exec_no.value()
+            if self.exec_btn.value():
+                a["button"] = self.exec_btn.value()
         elif t == "key":
             a["key"] = self.key.currentText().strip()
         elif t == "cmd":
@@ -329,7 +337,10 @@ class ButtonList(QWidget):
 # ---------------------------------------------------------------- sections
 
 class ConnectionPage(QWidget):
-    GEN = ("fader", "key", "encoder", "push", "button", "page", "command", "set")
+    GEN = ("fader", "key", "encoder", "push", "button", "page", "command", "set",
+           "exec", "exec_button", "exec_fader", "ping")
+    GEN_LABELS = {"exec": "Executor button", "exec_button": "Executor's fader button ({b})",
+                  "exec_fader": "Executor fader", "ping": "Ping (every 2 s)"}
 
     def __init__(self):
         super().__init__()
@@ -367,7 +378,7 @@ class ConnectionPage(QWidget):
         self.gen = {}
         for k in self.GEN:
             self.gen[k] = QLineEdit()
-            g.addRow(k.capitalize(), self.gen[k])
+            g.addRow(self.GEN_LABELS.get(k, k.capitalize()), self.gen[k])
         lay.addWidget(self.gen_box)
         self.val_box = QGroupBox("Generic OSC: values sent")
         v = QFormLayout(self.val_box)
